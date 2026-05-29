@@ -44,6 +44,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Hochgeladene Karten-Bilder. Über DATA_DIR auf einen persistenten Ordner
 # umlenkbar (z.B. /data in Containern). Lokal: aktuelles Verzeichnis.
 STATIC_DIR = Path(os.environ.get("DATA_DIR", ".")) / "static"
+# Mitgelieferte Design-Assets (Logo etc.) — liegen im Repo, immer verfügbar.
+ASSETS_DIR = PROJECT_ROOT / "webassets"
 
 
 def _esc(value: object) -> str:
@@ -53,6 +55,28 @@ def _esc(value: object) -> str:
 def _color(rarity: str) -> str:
     """Seltenheits-Farbe als #RRGGBB für CSS."""
     return f"#{RARITIES.get(rarity, RARITIES['common'])['color']:06X}"
+
+
+# Schlanke Line-Icons (Lucide-Stil) statt Emojis — erben die Farbe via currentColor.
+_ICON_PATHS = {
+    "grid": '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>'
+            '<rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    "layers": '<path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/>',
+    "gamepad": '<rect x="2" y="6" width="20" height="12" rx="5"/><line x1="6" y1="12" x2="10" y2="12"/>'
+               '<line x1="8" y1="10" x2="8" y2="14"/><circle cx="15" cy="13" r="1"/><circle cx="18" cy="11" r="1"/>',
+    "users": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>'
+             '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    "box": '<path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4'
+           'a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
+    "hash": '<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/>'
+            '<line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>',
+    "arrow": '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+}
+
+
+def _icon(name: str, size: int = 18) -> str:
+    return (f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+            f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{_ICON_PATHS[name]}</svg>')
 
 
 FONTS = (
@@ -135,6 +159,8 @@ class WebPanelCog(commands.Cog):
             web.post("/g/{gid}/channel", self.h_set_channel),
         ])
         app.router.add_static("/static/", path=str(STATIC_DIR))
+        if ASSETS_DIR.is_dir():
+            app.router.add_static("/assets/", path=str(ASSETS_DIR))
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -289,7 +315,7 @@ class WebPanelCog(commands.Cog):
             gid = next(iter(guilds))
             raise web.HTTPFound(f"/g/{gid}/overview")
         items = "".join(
-            f'<a href="/g/{gid}/overview">{_esc(name)}<span class="ic">→</span></a>'
+            f'<a href="/g/{gid}/overview">{_esc(name)}{_icon("arrow")}</a>'
             for gid, name in guilds.items()
         )
         body = f'<div class="guilds">{items}</div>'
@@ -318,16 +344,16 @@ class WebPanelCog(commands.Cog):
             chan_label = f"#{ch.name}" if ch else "—"
 
         def stat(n: object, label: str, ic: str) -> str:
-            return (f'<div class="stat"><span class="ic">{ic}</span>'
+            return (f'<div class="stat"><span class="ic">{_icon(ic, 19)}</span>'
                     f'<div class="n">{_esc(n)}</div><div class="l">{label}</div></div>')
 
         stats = (
             '<div class="stats">'
-            + stat(len(cards), "Kartentypen", "🃏")
-            + stat(len(games), "Belohnungs-Spiele", "🎮")
-            + stat(collectors, "Sammler", "👥")
-            + stat(f"{total_owned:,}".replace(",", " "), "Karten im Umlauf", "📦")
-            + stat(chan_label, "Drop-Channel", "#️⃣")
+            + stat(len(cards), "Kartentypen", "layers")
+            + stat(len(games), "Belohnungs-Spiele", "gamepad")
+            + stat(collectors, "Sammler", "users")
+            + stat(f"{total_owned:,}".replace(",", " "), "Karten im Umlauf", "box")
+            + stat(chan_label, "Drop-Channel", "hash")
             + "</div>"
         )
         chips = "".join(
@@ -341,10 +367,10 @@ class WebPanelCog(commands.Cog):
             + f'<div class="panel"><h2>Seltenheits-Verteilung</h2>'
             f'<div class="rar-chips">{chips}</div></div>'
             + '<div class="panel"><h2>Schnellzugriff</h2><div class="list">'
-            + f'<a class="row" href="/g/{gid}/cards"><span>🃏 Sammelkarten verwalten &amp; hochladen</span>'
-            f'<span class="ic">→</span></a>'
-            + f'<a class="row" href="/g/{gid}/games"><span>🎮 Spiele &amp; Drop-Channel einstellen</span>'
-            f'<span class="ic">→</span></a>'
+            + f'<a class="row" href="/g/{gid}/cards"><span class="rl">{_icon("layers")} '
+            f'Sammelkarten verwalten &amp; hochladen</span>{_icon("arrow")}</a>'
+            + f'<a class="row" href="/g/{gid}/games"><span class="rl">{_icon("gamepad")} '
+            f'Spiele &amp; Drop-Channel einstellen</span>{_icon("arrow")}</a>'
             + "</div></div>"
         )
         return self._html(sess, gid, body, active="overview", title="Übersicht",
@@ -381,48 +407,79 @@ class WebPanelCog(commands.Cog):
         <script>{UPLOAD_JS}</script>
         """
 
-        by_rar: dict[str, list[tuple]] = {}
-        for cid, name, rarity, url, game in cards:
-            by_rar.setdefault(rarity, []).append((cid, name, url, game))
+        sort = request.query.get("sort", "game")
+        if sort not in ("game", "rarity"):
+            sort = "game"
+        rar_index = {r: i for i, r in enumerate(RARITY_ORDER)}
+        counter = {"i": 0}
+
+        def render_card(cid: str, name: str, rarity: str, url: str | None, sub_text: str) -> str:
+            col = _color(rarity)
+            delay = f"{counter['i'] * 0.03:.2f}"
+            counter["i"] += 1
+            img = (f'<div class="img"><img src="{_esc(url)}" loading="lazy" alt=""></div>'
+                   if url else '<div class="img empty">kein Bild</div>')
+            return (
+                f'<article class="card" style="--rar:{col};animation-delay:{delay}s">'
+                f'<span class="top">{RARITIES.get(rarity, RARITIES["common"])["label"]}</span>'
+                f'<form method="post" action="/g/{gid}/cards/delete" '
+                f'onsubmit="return confirm(\'Karte löschen?\')">'
+                f'<input type="hidden" name="csrf" value="{sess["csrf"]}">'
+                f'<input type="hidden" name="card_id" value="{_esc(cid)}">'
+                f'<button class="del" title="Löschen">✕</button></form>{img}'
+                f'<div class="meta"><div class="nm"><span class="dot"></span>{_esc(name)}</div>'
+                f'<div class="sb">{_esc(sub_text)}</div></div></article>'
+            )
 
         sections = ""
-        idx = 0
-        for r in RARITY_ORDER:
-            items = by_rar.get(r)
-            if not items:
-                continue
-            col = _color(r)
-            cardhtml = ""
-            for cid, name, url, game in items:
-                delay = f"{idx * 0.03:.2f}"
-                idx += 1
-                img = (
-                    f'<div class="img"><img src="{_esc(url)}" loading="lazy" alt=""></div>'
-                    if url else '<div class="img empty">kein Bild</div>'
+        if sort == "rarity":
+            by_rar: dict[str, list[tuple]] = {}
+            for cid, name, rarity, url, game in cards:
+                by_rar.setdefault(rarity, []).append((cid, name, rarity, url, game))
+            for r in RARITY_ORDER:
+                items = by_rar.get(r)
+                if not items:
+                    continue
+                col = _color(r)
+                cardhtml = "".join(
+                    render_card(cid, name, rarity, url, game or "—")
+                    for cid, name, rarity, url, game in sorted(items, key=lambda c: c[1].lower())
                 )
-                cardhtml += (
-                    f'<article class="card" style="--rar:{col};animation-delay:{delay}s">'
-                    f'<span class="top">{RARITIES[r]["label"]}</span>'
-                    f'<form method="post" action="/g/{gid}/cards/delete" '
-                    f'onsubmit="return confirm(\'Karte löschen?\')">'
-                    f'<input type="hidden" name="csrf" value="{sess["csrf"]}">'
-                    f'<input type="hidden" name="card_id" value="{_esc(cid)}">'
-                    f'<button class="del" title="Löschen">✕</button></form>'
-                    f'{img}'
-                    f'<div class="meta"><div class="nm"><span class="dot"></span>{_esc(name)}</div>'
-                    f'<div class="sb">{_esc(game or "—")}</div></div>'
-                    f'</article>'
+                sections += (
+                    f'<div class="sect-h"><span class="sdot" style="background:{col};'
+                    f'box-shadow:0 0 10px {col}"></span>{RARITIES[r]["label"]} '
+                    f'<span class="count">{len(items)}</span></div><div class="grid">{cardhtml}</div>'
                 )
-            sections += (
-                f'<div class="sect-h"><span class="sdot" style="background:{col};box-shadow:0 0 10px {col}">'
-                f'</span>{RARITIES[r]["label"]} <span class="count">{len(items)}</span></div>'
-                f'<div class="grid">{cardhtml}</div>'
-            )
+        else:  # nach Spiel
+            by_game: dict[str, list[tuple]] = {}
+            for cid, name, rarity, url, game in cards:
+                by_game.setdefault((game or "").strip(), []).append((cid, name, rarity, url, game))
+            for g in sorted(by_game, key=lambda k: (k == "", k.lower())):
+                items = sorted(by_game[g], key=lambda c: (rar_index.get(c[2], 99), c[1].lower()))
+                cardhtml = "".join(
+                    render_card(cid, name, rarity, url, RARITIES.get(rarity, RARITIES["common"])["label"])
+                    for cid, name, rarity, url, game in items
+                )
+                label = g if g else "Ohne Spiel"
+                sections += (
+                    f'<div class="sect-h"><span class="sdot-i">{_icon("gamepad", 16)}</span>'
+                    f'{_esc(label)} <span class="count">{len(items)}</span></div>'
+                    f'<div class="grid">{cardhtml}</div>'
+                )
         if not sections:
             sections = ('<div class="empty-state">Noch keine Karten angelegt — '
-                        'lade oben deine erste Karte hoch! 🃏</div>')
+                        'lade oben deine erste Karte hoch!</div>')
 
-        body = upload + sections
+        def tab(key: str, label: str) -> str:
+            cls = "seg active" if sort == key else "seg"
+            return f'<a class="{cls}" href="/g/{gid}/cards?sort={key}">{label}</a>'
+
+        toolbar = (
+            '<div class="toolbar"><span class="tb-lbl">Sortierung</span>'
+            f'<div class="seg-group">{tab("game", "Nach Spiel")}{tab("rarity", "Nach Seltenheit")}</div></div>'
+        )
+
+        body = upload + toolbar + sections
         return self._html(sess, gid, body, active="cards", title="Sammelkarten",
                           subtitle=f"{len(cards)} Karten")
 
@@ -547,12 +604,12 @@ class WebPanelCog(commands.Cog):
         if gid is not None:
             def item(href: str, ic: str, label: str, key: str) -> str:
                 cls = "active" if key == active else ""
-                return f'<a class="{cls}" href="{href}"><span class="ic">{ic}</span>{label}</a>'
+                return f'<a class="{cls}" href="{href}"><span class="ic">{_icon(ic)}</span>{label}</a>'
             nav = (
                 '<nav class="nav">'
-                + item(f"/g/{gid}/overview", "◆", "Übersicht", "overview")
-                + item(f"/g/{gid}/cards", "🃏", "Sammelkarten", "cards")
-                + item(f"/g/{gid}/games", "🎮", "Spiele &amp; Channel", "games")
+                + item(f"/g/{gid}/overview", "grid", "Übersicht", "overview")
+                + item(f"/g/{gid}/cards", "layers", "Sammelkarten", "cards")
+                + item(f"/g/{gid}/games", "gamepad", "Spiele &amp; Channel", "games")
                 + "</nav>"
             )
         sub = f'<div class="sub">{_esc(subtitle)}</div>' if subtitle else ""
@@ -561,7 +618,7 @@ class WebPanelCog(commands.Cog):
 <title>{_esc(title) or "Panel"} · Yumikun</title>{FONTS}<style>{CSS}</style></head>
 <body><div class="app">
 <aside class="sidebar">
-  <div class="brand"><span class="logo">Y</span> Yumikun</div>
+  <div class="brand"><img class="logo" src="/assets/YamiKun.png" alt=""> Yumikun</div>
   {nav}
   <div class="sb-foot"><span class="who">Angemeldet als <b>{_esc(sess['username'])}</b></span>
   <a class="logout" href="/logout">Abmelden</a></div>
@@ -577,7 +634,7 @@ class WebPanelCog(commands.Cog):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · Yumikun</title>{FONTS}<style>{CSS}</style></head>
 <body><div class="simple"><div class="box">
-<div class="logo-lg">Y</div><h2>{_esc(title)}</h2><p>{message}</p>
+<img class="logo-lg" src="/assets/YamiKun.png" alt=""><h2>{_esc(title)}</h2><p>{message}</p>
 <a class="btn primary" href="/login">Erneut anmelden</a>
 </div></div></body></html>"""
 
@@ -609,12 +666,11 @@ h1,h2{font-family:"Bricolage Grotesque","Hanken Grotesk",sans-serif;letter-spaci
   background:linear-gradient(180deg,var(--bg2),transparent 70%)}
 .brand{display:flex;align-items:center;gap:10px;padding:6px 6px 20px;
   font-family:"Bricolage Grotesque";font-weight:700;font-size:1.18rem;letter-spacing:-.02em}
-.brand .logo{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;
-  background:var(--accent);color:var(--accent-ink);font-weight:800}
+.brand .logo{width:32px;height:32px;border-radius:9px;object-fit:cover}
 .nav{display:flex;flex-direction:column;gap:3px}
 .nav a{position:relative;display:flex;align-items:center;gap:11px;padding:10px 12px;
   border-radius:10px;color:var(--muted);font-weight:500;transition:background .15s,color .15s}
-.nav a .ic{width:18px;text-align:center;font-size:.95rem;opacity:.85}
+.nav a .ic{display:inline-flex;align-items:center;justify-content:center;width:18px;opacity:.85}
 .nav a:hover{background:var(--panel);color:var(--txt)}
 .nav a.active{background:var(--panel2);color:#fff;box-shadow:inset 3px 0 0 var(--accent)}
 .sb-foot{margin-top:auto;border-top:1px solid var(--line);padding-top:14px;
@@ -648,7 +704,16 @@ h1,h2{font-family:"Bricolage Grotesque","Hanken Grotesk",sans-serif;letter-spaci
 .sect-h{display:flex;align-items:center;gap:10px;margin:28px 0 13px;
   font-family:"Bricolage Grotesque";font-weight:600;font-size:1.02rem}
 .sect-h .sdot{width:10px;height:10px;border-radius:50%}
+.sect-h .sdot-i{display:inline-flex;color:var(--faint)}
 .sect-h .count{color:var(--faint);font-weight:500;font-family:"JetBrains Mono";font-size:.85rem}
+
+.toolbar{display:flex;align-items:center;gap:13px;margin:4px 0 2px}
+.tb-lbl{color:var(--faint);font-size:.74rem;text-transform:uppercase;letter-spacing:.07em}
+.seg-group{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line);
+  border-radius:11px;background:var(--panel)}
+.seg{padding:7px 14px;border-radius:8px;font-size:.85rem;font-weight:600;color:var(--muted);transition:.15s}
+.seg:hover{color:var(--txt)}
+.seg.active{background:var(--accent);color:var(--accent-ink)}
 
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(166px,1fr));gap:16px}
 .card{position:relative;background:var(--panel);border:1px solid var(--line);
@@ -703,6 +768,7 @@ input:focus,select:focus{outline:none;border-color:var(--accent);
 .row{display:flex;align-items:center;justify-content:space-between;gap:12px;
   padding:12px 15px;border:1px solid var(--line);border-radius:11px;background:var(--bg2);transition:.15s}
 a.row:hover{border-color:var(--accent);color:#fff}
+.row .rl{display:inline-flex;align-items:center;gap:11px}
 .row .x{background:none;border:0;color:var(--faint);cursor:pointer;font-size:.85rem;
   padding:6px 11px;border-radius:8px;font-family:inherit;font-weight:600}
 .row .x:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 12%,transparent)}
@@ -717,9 +783,7 @@ a.row:hover{border-color:var(--accent);color:#fff}
 .simple{min-height:100vh;display:grid;place-items:center;padding:24px}
 .simple .box{max-width:420px;text-align:center;background:var(--panel);border:1px solid var(--line);
   border-radius:18px;padding:42px 34px;box-shadow:0 20px 60px rgba(0,0,0,.45)}
-.simple .logo-lg{width:54px;height:54px;border-radius:14px;margin:0 auto 18px;display:grid;
-  place-items:center;background:var(--accent);color:var(--accent-ink);
-  font-family:"Bricolage Grotesque";font-weight:800;font-size:1.6rem}
+.simple .logo-lg{width:66px;height:66px;border-radius:16px;margin:0 auto 18px;object-fit:cover;display:block}
 .simple h2{font-size:1.45rem;margin:0 0 12px}
 .simple p{color:var(--muted);line-height:1.55;font-size:.92rem}
 .simple .btn{display:inline-block;margin-top:20px}
