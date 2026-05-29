@@ -800,6 +800,15 @@ class Database:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def rename_custom_card(self, guild_id: int, card_id: str, name: str) -> bool:
+        """Ändert nur den Anzeigenamen — card_id bleibt stabil (Inventare bleiben gültig)."""
+        cur = self.conn.execute(
+            "UPDATE custom_cards SET name = ? WHERE guild_id = ? AND card_id = ?",
+            (name, guild_id, card_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def list_custom_cards(self, guild_id: int) -> list[tuple[str, str, str, str | None, str | None]]:
         rows = self.conn.execute(
             "SELECT card_id, name, rarity, image_url, game FROM custom_cards WHERE guild_id = ?",

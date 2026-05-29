@@ -72,6 +72,7 @@ _ICON_PATHS = {
             '<line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>',
     "arrow": '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
     "check": '<path d="M20 6 9 17l-5-5"/>',
+    "edit": '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z"/>',
     "alert": '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>'
              '<line x1="12" y1="16" x2="12.01" y2="16"/>',
 }
@@ -111,6 +112,14 @@ inp.addEventListener('change',show);
 ['dragleave','dragend'].forEach(e=>dz.addEventListener(e,()=>dz.classList.remove('drag')));
 dz.addEventListener('drop',ev=>{ev.preventDefault();dz.classList.remove('drag');
 if(ev.dataTransfer.files.length){inp.files=ev.dataTransfer.files;show();}});
+"""
+
+RENAME_JS = """
+document.querySelectorAll('.card .edit').forEach(b=>b.addEventListener('click',()=>{
+  const n=prompt('Neuer Kartenname:', b.dataset.name);
+  if(n && n.trim()){const f=document.getElementById('renameForm');
+  f.card_id.value=b.dataset.id; f.newname.value=n.trim(); f.submit();}
+}));
 """
 
 
@@ -165,6 +174,7 @@ class WebPanelCog(commands.Cog):
             web.get("/g/{gid}/cards", self.h_cards),
             web.post("/g/{gid}/cards/add", self.h_cards_add),
             web.post("/g/{gid}/cards/delete", self.h_cards_delete),
+            web.post("/g/{gid}/cards/rename", self.h_cards_rename),
             web.get("/g/{gid}/games", self.h_games),
             web.post("/g/{gid}/games/add", self.h_games_add),
             web.post("/g/{gid}/games/remove", self.h_games_remove),
@@ -396,28 +406,33 @@ class WebPanelCog(commands.Cog):
         rarity_opts = "".join(
             f'<option value="{r}">{RARITIES[r]["label"]}</option>' for r in RARITIES
         )
-        game_datalist = "".join(f'<option value="{_esc(g)}">' for g in games)
-
-        upload = f"""
-        <div class="panel">
-          <h2>Neue Karte hochladen</h2>
-          <form method="post" action="/g/{gid}/cards/add" enctype="multipart/form-data" class="form-grid">
-            <input type="hidden" name="csrf" value="{sess['csrf']}">
-            <label class="f">Spiel<input name="game" list="games" required placeholder="z. B. Lost Ark"></label>
-            <datalist id="games">{game_datalist}</datalist>
-            <label class="f">Kartenname<input name="name" required maxlength="100" placeholder="z. B. Goblin Späher"></label>
-            <label class="f">Seltenheit<select name="rarity">{rarity_opts}</select></label>
-            <div class="dropzone" id="dz">
-              <span class="dz-ic">⬆</span>
-              <div class="dz-txt"><b id="fname">Bild hierher ziehen</b><br>oder klicken · PNG · JPG · GIF · WebP · max. 25 MB</div>
-              <img class="pv" id="preview" alt="">
-              <input type="file" name="image" id="imgInput" accept="image/*" required hidden>
+        if games:
+            game_opts = "".join(f'<option value="{_esc(g)}">{_esc(g)}</option>' for g in games)
+            upload = f"""
+            <div class="panel">
+              <h2>Neue Karte hochladen</h2>
+              <form method="post" action="/g/{gid}/cards/add" enctype="multipart/form-data" class="form-grid">
+                <input type="hidden" name="csrf" value="{sess['csrf']}">
+                <label class="f">Spiel<select name="game" required>{game_opts}</select></label>
+                <label class="f">Kartenname<input name="name" required maxlength="100" placeholder="z. B. Goblin Späher"></label>
+                <label class="f">Seltenheit<select name="rarity">{rarity_opts}</select></label>
+                <div class="dropzone" id="dz">
+                  <span class="dz-ic">⬆</span>
+                  <div class="dz-txt"><b id="fname">Bild hierher ziehen</b><br>oder klicken · PNG · JPG · GIF · WebP · max. 25 MB</div>
+                  <img class="pv" id="preview" alt="">
+                  <input type="file" name="image" id="imgInput" accept="image/*" required hidden>
+                </div>
+                <div class="actions"><button class="btn primary">Karte anlegen</button></div>
+              </form>
             </div>
-            <div class="actions"><button class="btn primary">Karte anlegen</button></div>
-          </form>
-        </div>
-        <script>{UPLOAD_JS}</script>
-        """
+            <script>{UPLOAD_JS}</script>
+            """
+        else:
+            upload = (
+                '<div class="panel"><h2>Neue Karte hochladen</h2>'
+                f'<p class="hint">Lege zuerst unter <a class="link" href="/g/{gid}/games">Spiele &amp; Channel</a> '
+                'ein Spiel an — Karten gehören immer zu einem Spiel.</p></div>'
+            )
 
         sort = request.query.get("sort", "game")
         if sort not in ("game", "rarity"):
@@ -438,7 +453,9 @@ class WebPanelCog(commands.Cog):
                 f'onsubmit="return confirm(\'Karte löschen?\')">'
                 f'<input type="hidden" name="csrf" value="{sess["csrf"]}">'
                 f'<input type="hidden" name="card_id" value="{_esc(cid)}">'
-                f'<button class="del" title="Löschen">✕</button></form>{img}'
+                f'<button class="del" title="Löschen">✕</button></form>'
+                f'<button type="button" class="edit" data-id="{_esc(cid)}" data-name="{_esc(name)}" '
+                f'title="Umbenennen">{_icon("edit", 14)}</button>{img}'
                 f'<div class="meta"><div class="nm"><span class="dot"></span>{_esc(name)}</div>'
                 f'<div class="sb">{_esc(sub_text)}</div></div></article>'
             )
@@ -491,13 +508,22 @@ class WebPanelCog(commands.Cog):
             f'<div class="seg-group">{tab("game", "Nach Spiel")}{tab("rarity", "Nach Seltenheit")}</div></div>'
         )
 
+        ok = request.query.get("ok")
         banner = ""
-        if request.query.get("ok"):
+        if ok == "rename":
+            banner = f'<div class="banner ok">{_icon("check")} Kartenname geändert.</div>'
+        elif ok:
             banner = f'<div class="banner ok">{_icon("check")} Karte erfolgreich angelegt.</div>'
         elif request.query.get("err") in UPLOAD_ERRORS:
             banner = f'<div class="banner err">{_icon("alert")} {UPLOAD_ERRORS[request.query["err"]]}</div>'
 
-        body = banner + upload + toolbar + sections
+        rename_form = (
+            f'<form id="renameForm" method="post" action="/g/{gid}/cards/rename" hidden>'
+            f'<input type="hidden" name="csrf" value="{sess["csrf"]}">'
+            f'<input type="hidden" name="card_id"><input type="hidden" name="newname"></form>'
+            f'<script>{RENAME_JS}</script>'
+        )
+        body = banner + upload + toolbar + sections + rename_form
         return self._html(sess, gid, body, active="cards", title="Sammelkarten",
                           subtitle=f"{len(cards)} Karten")
 
@@ -547,6 +573,16 @@ class WebPanelCog(commands.Cog):
             for old in (STATIC_DIR / "cards" / str(gid)).glob(f"{card_id}.*"):
                 old.unlink(missing_ok=True)
         raise web.HTTPFound(f"/g/{gid}/cards")
+
+    async def h_cards_rename(self, request: web.Request) -> web.StreamResponse:
+        sess, gid = self._require_guild(request)
+        data = await request.post()
+        self._check_csrf(sess, data)
+        card_id = str(data.get("card_id", ""))
+        name = str(data.get("newname", "")).strip()[:100]
+        if card_id and name:
+            self.db.rename_custom_card(gid, card_id, name)
+        raise web.HTTPFound(f"/g/{gid}/cards?ok=rename")
 
     async def h_games(self, request: web.Request) -> web.StreamResponse:
         sess, gid = self._require_guild(request)
@@ -786,6 +822,12 @@ h1,h2{font-family:"Bricolage Grotesque","Hanken Grotesk",sans-serif;letter-spaci
   opacity:0;transition:.15s;backdrop-filter:blur(4px);font-size:.8rem}
 .card:hover .del{opacity:1}
 .card .del:hover{color:var(--danger);border-color:var(--danger)}
+.card .edit{position:absolute;top:8px;right:42px;z-index:3;width:28px;height:28px;border-radius:8px;
+  border:1px solid var(--line2);background:rgba(8,9,12,.72);color:var(--muted);cursor:pointer;
+  opacity:0;transition:.15s;backdrop-filter:blur(4px);display:grid;place-items:center}
+.card:hover .edit{opacity:1}
+.card .edit:hover{color:var(--accent);border-color:var(--accent)}
+.link{color:var(--accent)}
 
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 
