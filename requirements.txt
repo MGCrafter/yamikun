@@ -1,0 +1,5 @@
+discord.py>=2.4
+
+# Optional: lädt automatisch eine .env-Datei. Ohne dieses Paket funktioniert
+# der Bot trotzdem, solange DISCORD_TOKEN als Umgebungsvariable gesetzt ist.
+python-dotenv>=1.0

@@ -1,0 +1,18 @@
+# Secrets & lokaler Laufzeit-Zustand — NIE ins Image backen
+.env
+.env.*
+bot.db
+bot.db-wal
+bot.db-shm
+config.json
+static/
+
+# Virtuelle Umgebung & Caches (gross, plattformabhängig)
+.venv/
+__pycache__/
+*.py[cod]
+
+# Sonstiges
+.git/
+*.md
+.gitignore

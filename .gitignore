@@ -1,0 +1,17 @@
+# Bot-Konfiguration (enthält Channel- & Message-IDs, lokaler Laufzeit-Zustand)
+config.json
+
+# SQLite-Datenbank (Leveling, Announcer) + WAL-Dateien
+bot.db
+bot.db-wal
+bot.db-shm
+
+# Secrets
+.env
+
+# Hochgeladene Karten-Bilder (Web-Panel)
+static/
+
+# Python
+__pycache__/
+*.py[cod]
