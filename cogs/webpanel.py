@@ -550,18 +550,28 @@ class WebPanelCog(commands.Cog):
 
     async def h_games(self, request: web.Request) -> web.StreamResponse:
         sess, gid = self._require_guild(request)
-        games = self.db.list_reward_games(gid)
+        games = self.db.list_reward_games_full(gid)
         guild = self.bot.get_guild(gid)
         chan_id = self.db.get_card_channel(gid)
 
         game_rows = "".join(
-            f'<div class="row"><span>🎮 {_esc(g)}</span>'
+            f'<div class="grow">'
+            f'<form class="gedit" method="post" action="/g/{gid}/games/add">'
+            f'<input type="hidden" name="csrf" value="{sess["csrf"]}">'
+            f'<input type="hidden" name="game" value="{_esc(g)}">'
+            f'<span class="gname">{_icon("gamepad", 16)} {_esc(g)}</span>'
+            f'<label class="mini">alle <input type="number" name="interval" value="{iv}" min="1" max="1440"> Min</label>'
+            f'<label class="mini">max <input type="number" name="cap" value="{cap}" min="1" max="100"> /Tag</label>'
+            f'<button class="btn primary sm">Speichern</button></form>'
             f'<form method="post" action="/g/{gid}/games/remove">'
             f'<input type="hidden" name="csrf" value="{sess["csrf"]}">'
             f'<input type="hidden" name="game" value="{_esc(g)}">'
-            f'<button class="x">Entfernen</button></form></div>'
-            for g in games
-        ) or '<div class="empty-state">Keine Spiele eingetragen.</div>'
+            f'<button class="x" title="Entfernen">✕</button></form>'
+            f'</div>'
+            for g, iv, cap in games
+        )
+        game_rows = (f'<div class="glist">{game_rows}</div>' if games
+                     else '<div class="empty-state">Keine Spiele eingetragen.</div>')
 
         chan_opts = ['<option value="">— DMs (kein Channel) —</option>']
         if guild is not None:
@@ -572,12 +582,15 @@ class WebPanelCog(commands.Cog):
         body = f"""
         <div class="panel">
           <h2>Belohnungs-Spiele</h2>
-          <form method="post" action="/g/{gid}/games/add" class="inline">
+          <p class="hint">1 Karte je X Minuten Spielzeit, begrenzt auf Y Karten pro Tag — je Spiel einstellbar.</p>
+          <form method="post" action="/g/{gid}/games/add" class="inline wrap">
             <input type="hidden" name="csrf" value="{sess['csrf']}">
-            <input name="game" required placeholder="Exakter Spielname (wie in Discord angezeigt)">
+            <input name="game" required placeholder="Spielname (wie in Discord)">
+            <label class="mini">alle <input type="number" name="interval" value="30" min="1" max="1440"> Min</label>
+            <label class="mini">max <input type="number" name="cap" value="12" min="1" max="100"> /Tag</label>
             <button class="btn primary">Hinzufügen</button>
           </form>
-          <div class="list">{game_rows}</div>
+          {game_rows}
         </div>
         <div class="panel">
           <h2>Karten-Drop-Channel</h2>
@@ -597,8 +610,15 @@ class WebPanelCog(commands.Cog):
         data = await request.post()
         self._check_csrf(sess, data)
         game = str(data.get("game", "")).strip()
+
+        def _intval(key: str, default: int, lo: int, hi: int) -> int:
+            raw = str(data.get(key, "")).strip()
+            return max(lo, min(hi, int(raw))) if raw.isdigit() else default
+
         if game:
-            self.db.add_reward_game(gid, game)
+            interval = _intval("interval", 30, 1, 1440)
+            cap = _intval("cap", 12, 1, 100)
+            self.db.add_reward_game(gid, game, interval, cap)
         raise web.HTTPFound(f"/g/{gid}/games")
 
     async def h_games_remove(self, request: web.Request) -> web.StreamResponse:
@@ -792,7 +812,18 @@ input:focus,select:focus{outline:none;border-color:var(--accent);
 .btn.primary:hover{filter:brightness(1.07);transform:translateY(-1px)}
 
 .inline{display:flex;gap:10px;margin-bottom:16px}
-.inline input,.inline select{flex:1}
+.inline.wrap{flex-wrap:wrap;align-items:center}
+.inline input[name=game]{flex:1;min-width:180px}
+.inline select{flex:1}
+.glist{display:flex;flex-direction:column;gap:8px}
+.grow{display:flex;align-items:center;gap:8px}
+.gedit{flex:1;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:10px 14px;border:1px solid var(--line);border-radius:11px;background:var(--bg2)}
+.gname{display:inline-flex;align-items:center;gap:8px;font-weight:600;flex:1;min-width:150px}
+.gname svg{color:var(--faint)}
+.mini{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.82rem;white-space:nowrap}
+.mini input{width:62px;padding:7px 9px}
+.btn.sm{padding:8px 14px;font-size:.82rem}
 .list{display:flex;flex-direction:column;gap:8px}
 .row{display:flex;align-items:center;justify-content:space-between;gap:12px;
   padding:12px 15px;border:1px solid var(--line);border-radius:11px;background:var(--bg2);transition:.15s}

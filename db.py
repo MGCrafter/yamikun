@@ -140,18 +140,21 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS reward_games (
-                guild_id INTEGER NOT NULL,
-                game     TEXT    NOT NULL,   -- kleingeschrieben für Matching
+                guild_id     INTEGER NOT NULL,
+                game         TEXT    NOT NULL,   -- kleingeschrieben für Matching
+                interval_min INTEGER NOT NULL DEFAULT 30,  -- Minuten pro Karte
+                daily_cap    INTEGER NOT NULL DEFAULT 12,   -- max. Karten/Tag
                 PRIMARY KEY (guild_id, game)
             );
 
             CREATE TABLE IF NOT EXISTS playtime (
                 guild_id    INTEGER NOT NULL,
                 user_id     INTEGER NOT NULL,
+                game        TEXT    NOT NULL DEFAULT '',  -- Tracking pro Spiel
                 accumulated INTEGER NOT NULL DEFAULT 0,  -- Sekunden Richtung nächster Karte
                 day         TEXT,                        -- YYYY-MM-DD (Tages-Cap)
                 cards_today INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
+                PRIMARY KEY (guild_id, user_id, game)
             );
 
             CREATE TABLE IF NOT EXISTS custom_cards (
@@ -217,6 +220,25 @@ class Database:
             self.conn.execute("ALTER TABLE guild_settings ADD COLUMN card_channel_id INTEGER")
         except sqlite3.OperationalError:
             pass
+        # Pro-Spiel-Einstellungen für Karten-Rewards nachrüsten.
+        for col, default in (("interval_min", 30), ("daily_cap", 12)):
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE reward_games ADD COLUMN {col} INTEGER NOT NULL DEFAULT {default}"
+                )
+            except sqlite3.OperationalError:
+                pass
+        # Playtime auf Pro-Spiel-Tracking umstellen (game-Spalte + neuer PK).
+        # Die Tabelle hält nur transiente Tages-Zähler, daher gefahrlos neu aufbaubar.
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(playtime)").fetchall()]
+        if cols and "game" not in cols:
+            self.conn.execute("DROP TABLE playtime")
+            self.conn.execute(
+                "CREATE TABLE playtime ("
+                "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, game TEXT NOT NULL DEFAULT '', "
+                "accumulated INTEGER NOT NULL DEFAULT 0, day TEXT, cards_today INTEGER NOT NULL DEFAULT 0, "
+                "PRIMARY KEY (guild_id, user_id, game))"
+            )
         self.conn.commit()
 
     def close(self) -> None:
@@ -874,12 +896,36 @@ class Database:
 
     # --- Belohnungs-Spiele ----------------------------------------------------
 
-    def add_reward_game(self, guild_id: int, game: str) -> None:
+    def add_reward_game(
+        self, guild_id: int, game: str, interval_min: int = 30, daily_cap: int = 12
+    ) -> None:
+        """Legt ein Belohnungs-Spiel an oder aktualisiert dessen Einstellungen."""
         self.conn.execute(
-            "INSERT OR IGNORE INTO reward_games (guild_id, game) VALUES (?, ?)",
-            (guild_id, game.lower()),
+            "INSERT INTO reward_games (guild_id, game, interval_min, daily_cap) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, game) DO UPDATE SET "
+            "interval_min = excluded.interval_min, daily_cap = excluded.daily_cap",
+            (guild_id, game.lower(), interval_min, daily_cap),
         )
         self.conn.commit()
+
+    def get_reward_game(self, guild_id: int, game: str) -> tuple[int, int]:
+        """(interval_min, daily_cap) eines Spiels; Defaults (30, 12), falls unbekannt."""
+        row = self.conn.execute(
+            "SELECT interval_min, daily_cap FROM reward_games WHERE guild_id = ? AND game = ?",
+            (guild_id, game.lower()),
+        ).fetchone()
+        if row is None:
+            return 30, 12
+        return int(row["interval_min"]), int(row["daily_cap"])
+
+    def list_reward_games_full(self, guild_id: int) -> list[tuple[str, int, int]]:
+        """[(game, interval_min, daily_cap), …]."""
+        rows = self.conn.execute(
+            "SELECT game, interval_min, daily_cap FROM reward_games WHERE guild_id = ? ORDER BY game",
+            (guild_id,),
+        ).fetchall()
+        return [(r["game"], int(r["interval_min"]), int(r["daily_cap"])) for r in rows]
 
     def remove_reward_game(self, guild_id: int, game: str) -> bool:
         cur = self.conn.execute(
@@ -902,23 +948,25 @@ class Database:
 
     # --- Spielzeit (Karten-Rewards) -------------------------------------------
 
-    def get_playtime(self, guild_id: int, user_id: int) -> tuple[int, str | None, int]:
+    def get_playtime(self, guild_id: int, user_id: int, game: str = "") -> tuple[int, str | None, int]:
         row = self.conn.execute(
-            "SELECT accumulated, day, cards_today FROM playtime WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id),
+            "SELECT accumulated, day, cards_today FROM playtime "
+            "WHERE guild_id = ? AND user_id = ? AND game = ?",
+            (guild_id, user_id, game),
         ).fetchone()
         if row is None:
             return 0, None, 0
         return int(row["accumulated"]), row["day"], int(row["cards_today"])
 
     def set_playtime(
-        self, guild_id: int, user_id: int, accumulated: int, day: str, cards_today: int
+        self, guild_id: int, user_id: int, accumulated: int, day: str, cards_today: int,
+        game: str = "",
     ) -> None:
         self.conn.execute(
-            "INSERT INTO playtime (guild_id, user_id, accumulated, day, cards_today) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET "
+            "INSERT INTO playtime (guild_id, user_id, game, accumulated, day, cards_today) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id, game) DO UPDATE SET "
             "accumulated = excluded.accumulated, day = excluded.day, cards_today = excluded.cards_today",
-            (guild_id, user_id, accumulated, day, cards_today),
+            (guild_id, user_id, game, accumulated, day, cards_today),
         )
         self.conn.commit()

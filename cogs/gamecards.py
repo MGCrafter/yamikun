@@ -21,8 +21,8 @@ from discord.ext import commands, tasks
 
 logger = logging.getLogger("oaken-tower-bot")
 
-CARD_INTERVAL = 1800
-DAILY_CAP = 12
+DEFAULT_INTERVAL_MIN = 30  # Minuten pro Karte (Standard für neue Spiele)
+DEFAULT_DAILY_CAP = 12     # max. Karten/Tag (Standard für neue Spiele)
 SETTLE_MINUTES = 10.0
 
 RARITIES: dict[str, dict] = {
@@ -386,21 +386,23 @@ class GameCardsCog(commands.Cog):
         catalog = build_game_catalog(self.db, guild.id, game)
         if not catalog:
             return  # keine Karten für dieses Spiel angelegt → nichts zu vergeben
-        acc, day, cards_today = self.db.get_playtime(guild.id, member.id)
+        interval_min, daily_cap = self.db.get_reward_game(guild.id, game)
+        interval = max(1, interval_min) * 60  # Sekunden pro Karte
+        acc, day, cards_today = self.db.get_playtime(guild.id, member.id, game)
         today = _today()
         if day != today:
             day, cards_today = today, 0
         acc += secs
         granted: list[str] = []
-        while acc >= CARD_INTERVAL and cards_today < DAILY_CAP:
-            acc -= CARD_INTERVAL
+        while acc >= interval and cards_today < daily_cap:
+            acc -= interval
             cards_today += 1
             cid = _roll_card(catalog)
             self.db.add_card(guild.id, member.id, cid)
             granted.append(cid)
-        if cards_today >= DAILY_CAP:
-            acc = min(acc, CARD_INTERVAL - 1)
-        self.db.set_playtime(guild.id, member.id, acc, day, cards_today)
+        if cards_today >= daily_cap:
+            acc = min(acc, interval - 1)
+        self.db.set_playtime(guild.id, member.id, acc, day, cards_today, game)
         if not granted:
             return
         # Ziel: konfigurierter Karten-Channel (öffentlich), sonst DM an den User.
@@ -529,15 +531,28 @@ class GameCardsCog(commands.Cog):
         default_permissions=discord.Permissions(manage_guild=True),
     )
 
-    @gamereward.command(name="addgame", description="Fügt ein Spiel hinzu, das Karten gibt.")
-    @app_commands.describe(spiel="Exakter Spielname (wie in Discord angezeigt), z.B. Lost Ark")
-    async def addgame(self, interaction: discord.Interaction, spiel: str) -> None:
-        self.db.add_reward_game(interaction.guild_id, spiel)
+    @gamereward.command(
+        name="addgame",
+        description="Fügt ein Spiel hinzu oder ändert dessen Intervall/Tageslimit.",
+    )
+    @app_commands.describe(
+        spiel="Exakter Spielname (wie in Discord angezeigt), z.B. League of Legends",
+        intervall="Minuten Spielzeit pro Karte (Standard 30)",
+        tageslimit="Maximale Karten pro Tag (Standard 12)",
+    )
+    async def addgame(
+        self,
+        interaction: discord.Interaction,
+        spiel: str,
+        intervall: app_commands.Range[int, 1, 1440] = DEFAULT_INTERVAL_MIN,
+        tageslimit: app_commands.Range[int, 1, 100] = DEFAULT_DAILY_CAP,
+    ) -> None:
+        self.db.add_reward_game(interaction.guild_id, spiel, intervall, tageslimit)
         note = "" if self.bot.intents.presences else (
             "\n⚠️ **Presence Intent ist aus** — der Bot kann noch nicht erkennen, wer spielt."
         )
         await interaction.response.send_message(
-            f"✅ **{spiel}** ist eingetragen (1 Karte pro 30 Min, max. {DAILY_CAP}/Tag).\n"
+            f"✅ **{spiel}** eingetragen: 1 Karte pro **{intervall} Min**, max. **{tageslimit}/Tag**.\n"
             f"Lege jetzt Karten an: `/gamereward addcard spiel:{spiel} …` "
             f"(ohne Karten gibt es keine Drops).{note}",
             ephemeral=True,
@@ -554,12 +569,15 @@ class GameCardsCog(commands.Cog):
 
     @gamereward.command(name="listgames", description="Zeigt alle Belohnungs-Spiele.")
     async def listgames(self, interaction: discord.Interaction) -> None:
-        games = self.db.list_reward_games(interaction.guild_id)
+        games = self.db.list_reward_games_full(interaction.guild_id)
         status = "🟢 aktiv" if self.bot.intents.presences else "🔴 Presence Intent aus"
-        text = ("\n".join(f"• {g}" for g in games)) if games else "_keine eingetragen_"
+        text = (
+            "\n".join(f"• **{g}** — 1 Karte / {iv} Min · max. {cap}/Tag" for g, iv, cap in games)
+            if games else "_keine eingetragen_"
+        )
         embed = discord.Embed(
             title="🎮 Karten-Belohnungs-Spiele",
-            description=f"{text}\n\nTracking: {status}\n1 Karte / 30 Min · max. {DAILY_CAP}/Tag",
+            description=f"{text}\n\nTracking: {status}",
             color=0x5865F2,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
