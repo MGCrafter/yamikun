@@ -37,7 +37,7 @@ SCOPE = "identify"
 SESSION_COOKIE = "ot_session"
 STATE_COOKIE = "ot_oauth_state"
 SESSION_TTL = 60 * 60 * 8  # 8 Stunden
-MAX_UPLOAD = 10 * 1024 * 1024  # 10 MB
+MAX_UPLOAD = 25 * 1024 * 1024  # 25 MB
 ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +71,18 @@ _ICON_PATHS = {
     "hash": '<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/>'
             '<line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>',
     "arrow": '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+    "check": '<path d="M20 6 9 17l-5-5"/>',
+    "alert": '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>'
+             '<line x1="12" y1="16" x2="12.01" y2="16"/>',
+}
+
+# Banner-Texte für Upload-Ergebnisse (Fehlercodes via ?err=…).
+UPLOAD_ERRORS = {
+    "size": "Datei zu groß — maximal 25 MB erlaubt.",
+    "type": "Dateityp nicht unterstützt — erlaubt sind PNG, JPG, GIF und WebP.",
+    "fields": "Bitte Spiel, Name und Seltenheit ausfüllen.",
+    "noimg": "Bitte ein Bild auswählen.",
+    "name": "Ungültiger Name — mindestens ein Buchstabe oder eine Ziffer nötig.",
 }
 
 
@@ -397,7 +409,7 @@ class WebPanelCog(commands.Cog):
             <label class="f">Seltenheit<select name="rarity">{rarity_opts}</select></label>
             <div class="dropzone" id="dz">
               <span class="dz-ic">⬆</span>
-              <div class="dz-txt"><b id="fname">Bild hierher ziehen</b><br>oder klicken · PNG · JPG · GIF · WebP</div>
+              <div class="dz-txt"><b id="fname">Bild hierher ziehen</b><br>oder klicken · PNG · JPG · GIF · WebP · max. 25 MB</div>
               <img class="pv" id="preview" alt="">
               <input type="file" name="image" id="imgInput" accept="image/*" required hidden>
             </div>
@@ -479,28 +491,39 @@ class WebPanelCog(commands.Cog):
             f'<div class="seg-group">{tab("game", "Nach Spiel")}{tab("rarity", "Nach Seltenheit")}</div></div>'
         )
 
-        body = upload + toolbar + sections
+        banner = ""
+        if request.query.get("ok"):
+            banner = f'<div class="banner ok">{_icon("check")} Karte erfolgreich angelegt.</div>'
+        elif request.query.get("err") in UPLOAD_ERRORS:
+            banner = f'<div class="banner err">{_icon("alert")} {UPLOAD_ERRORS[request.query["err"]]}</div>'
+
+        body = banner + upload + toolbar + sections
         return self._html(sess, gid, body, active="cards", title="Sammelkarten",
                           subtitle=f"{len(cards)} Karten")
 
     async def h_cards_add(self, request: web.Request) -> web.StreamResponse:
         sess, gid = self._require_guild(request)
-        data = await request.post()
+        back = f"/g/{gid}/cards"
+        # Zu große Uploads lösen beim Body-Parsing 413 aus → freundlich abfangen.
+        try:
+            data = await request.post()
+        except web.HTTPRequestEntityTooLarge:
+            raise web.HTTPFound(f"{back}?err=size")
         self._check_csrf(sess, data)
         game = str(data.get("game", "")).strip()
         name = str(data.get("name", "")).strip()
         rarity = str(data.get("rarity", "common"))
         field = data.get("image")
         if not game or not name or rarity not in RARITIES:
-            return web.HTTPBadRequest(text="Spiel, Name und gültige Seltenheit sind Pflicht.")
+            raise web.HTTPFound(f"{back}?err=fields")
         if not isinstance(field, web.FileField):
-            return web.HTTPBadRequest(text="Kein Bild hochgeladen.")
+            raise web.HTTPFound(f"{back}?err=noimg")
         ext = Path(field.filename or "").suffix.lower()
         if ext not in ALLOWED_EXT:
-            return web.HTTPBadRequest(text=f"Dateityp nicht erlaubt ({', '.join(sorted(ALLOWED_EXT))}).")
+            raise web.HTTPFound(f"{back}?err=type")
         card_id = _slug(game, name)
         if card_id is None:
-            return web.HTTPBadRequest(text="Ungültiger Name (mind. ein Buchstabe/Ziffer).")
+            raise web.HTTPFound(f"{back}?err=name")
 
         guild_dir = STATIC_DIR / "cards" / str(gid)
         guild_dir.mkdir(parents=True, exist_ok=True)
@@ -508,12 +531,11 @@ class WebPanelCog(commands.Cog):
         for old in guild_dir.glob(f"{card_id}.*"):
             old.unlink(missing_ok=True)
         dest = guild_dir / f"{card_id}{ext}"
-        content = field.file.read()
-        dest.write_bytes(content)
+        dest.write_bytes(field.file.read())
 
         url = f"{self.base_url}/static/cards/{gid}/{card_id}{ext}"
         self.db.add_custom_card(gid, card_id, name, rarity, url, game)
-        raise web.HTTPFound(f"/g/{gid}/cards")
+        raise web.HTTPFound(f"{back}?ok=1")
 
     async def h_cards_delete(self, request: web.Request) -> web.StreamResponse:
         sess, gid = self._require_guild(request)
@@ -707,6 +729,13 @@ h1,h2{font-family:"Bricolage Grotesque","Hanken Grotesk",sans-serif;letter-spaci
 .sect-h .sdot-i{display:inline-flex;color:var(--faint)}
 .sect-h .count{color:var(--faint);font-weight:500;font-family:"JetBrains Mono";font-size:.85rem}
 
+.banner{display:flex;align-items:center;gap:10px;padding:13px 16px;border-radius:11px;
+  margin-bottom:18px;font-size:.9rem;font-weight:500;animation:rise .4s both}
+.banner svg{flex:none}
+.banner.err{color:#ffb4b4;background:color-mix(in srgb,var(--danger) 13%,transparent);
+  border:1px solid color-mix(in srgb,var(--danger) 40%,transparent)}
+.banner.ok{color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--accent) 38%,transparent)}
 .toolbar{display:flex;align-items:center;gap:13px;margin:4px 0 2px}
 .tb-lbl{color:var(--faint);font-size:.74rem;text-transform:uppercase;letter-spacing:.07em}
 .seg-group{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line);
