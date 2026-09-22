@@ -1,18 +1,58 @@
-# Secrets & lokaler Laufzeit-Zustand — NIE ins Image backen
+# Secrets & persistente Daten: kommen ausschließlich aus Env / /data.
 .env
 .env.*
-bot.db
-bot.db-wal
-bot.db-shm
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.db
+**/*.db-*
+**/*.db.*
+**/*.sqlite*
 config.json
 static/
+data/
+backups/
 
-# Virtuelle Umgebung & Caches (gross, plattformabhängig)
-.venv/
-__pycache__/
-*.py[cod]
-
-# Sonstiges
+# Lokale Ablage, Archive und Git-Metadaten
+.local/
+.hermes/
+.codex/
 .git/
-*.md
+.github/
+TMP for Caprover Tarballs/
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.bak
+**/*.log
+
+# Entwicklungsumgebungen und generierte Dateien
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+**/node_modules/
+frontend/dist/
+**/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+.idea/
+.vscode/
+**/.DS_Store
+
+# Dokumentation & lokale Werkzeuge; webassets/ bleibt im Image.
+docs/
+tests/
+scripts/
+dev_panel.py
+requirements-dev.txt
+**/*.md
 .gitignore
+.gitattributes

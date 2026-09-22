@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 
@@ -42,6 +43,26 @@ def level_from_total(total_xp: int) -> tuple[int, int]:
         remaining -= xp_needed(level)
         level += 1
     return level, remaining
+
+
+LEVELUP_PLACEHOLDERS = ["{user}", "{user_name}", "{level}", "{coins}", "{server}"]
+
+
+def render_levelup(
+    template: str, member: discord.Member, level: int, coins_gained: int, server_name: str
+) -> str:
+    """Platzhalter im eigenen Level-Up-Text ersetzen (per replace, nie str.format)."""
+    repl = {
+        "{user}": member.mention,
+        "{user_name}": member.display_name,
+        "{level}": str(level),
+        "{coins}": f"{coins_gained:,}".replace(",", "."),
+        "{server}": server_name,
+    }
+    text = template
+    for key, value in repl.items():
+        text = text.replace(key, value)
+    return text
 
 
 class LevelingCog(commands.Cog):
@@ -98,26 +119,50 @@ class LevelingCog(commands.Cog):
         coins_gained: int,
         new_balance: int,
     ) -> None:
-        channel_id = self.db.get_levelup_channel(guild.id)
+        cfg = self.db.get_levelup_config(guild.id)
+        channel_id = cfg["channel_id"]
         if not channel_id:
             return
         channel = guild.get_channel(channel_id)
         if not isinstance(channel, discord.abc.Messageable):
             return
+        # Ping steuert nur, ob eine Benachrichtigung ausgelöst wird — die Erwähnung
+        # bleibt als Text sichtbar, wird aber bei "aus" nicht zugestellt.
+        ping = cfg["ping"]
+        mentions = (
+            discord.AllowedMentions(users=True, everyone=False, roles=False)
+            if ping else discord.AllowedMentions.none()
+        )
+
+        custom = (cfg["message"] or "").strip()
+        if custom:
+            text = render_levelup(custom, member, new_level, coins_gained, guild.name)
+            try:
+                await channel.send(content=text, allowed_mentions=mentions)
+            except discord.Forbidden:
+                logger.warning("Keine Berechtigung für Level-Up-Meldung in Channel %s.", channel_id)
+            return
+
         coin = self.coin(guild)
         coins_fmt = f"{coins_gained:,}".replace(",", ".")
         balance_fmt = f"{new_balance:,}".replace(",", ".")
 
-        embed = discord.Embed(title="🎉 LEVEL UP!", color=0xF1C40F)
-        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed = discord.Embed(
+            title=f"🏆  Level {new_level} erreicht",
+            description=f"**{member.display_name}** ist aufgestiegen!",
+            color=0xA3E635,
+        )
+        embed.set_author(name="✦  LEVEL UP", icon_url=member.display_avatar.url)
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Neues Level", value=f"**{new_level}**", inline=True)
-        embed.add_field(name="Belohnung", value=f"+{coins_fmt} {coin}", inline=True)
-        embed.add_field(name="Kontostand", value=f"{balance_fmt} {coin}", inline=True)
+        embed.add_field(name="📈 Level", value=f"**{new_level}**", inline=True)
+        embed.add_field(name="💰 Belohnung", value=f"+{coins_fmt} {coin}", inline=True)
+        embed.add_field(name="💎 Kontostand", value=f"{balance_fmt} {coin}", inline=True)
+        embed.set_footer(text="Bleib aktiv — jede Nachricht & Voice-Minute bringt XP.")
 
         try:
-            # Inhalt = Mention, damit der User auch eine Benachrichtigung bekommt.
-            await channel.send(content=member.mention, embed=embed)
+            await channel.send(
+                content=member.mention if ping else None, embed=embed, allowed_mentions=mentions,
+            )
         except discord.Forbidden:
             logger.warning("Keine Berechtigung für Level-Up-Meldung in Channel %s.", channel_id)
 
@@ -181,16 +226,18 @@ class LevelingCog(commands.Cog):
         need = xp_needed(level)
         coin = self.coin(interaction.guild)
 
-        embed = discord.Embed(title=f"Rang von {target.display_name}", color=0x5865F2)
-        embed.add_field(name="Level", value=str(level))
-        embed.add_field(name="XP", value=f"{into_level} / {need}")
-        embed.add_field(name="Gesamt-XP", value=str(int(row["xp"])))
-        embed.add_field(name="Coins", value=f"{int(row['coins'])} {coin}")
+        embed = discord.Embed(color=0xA3E635)
+        embed.set_author(name="✦  RANG", icon_url=target.display_avatar.url if isinstance(target, discord.Member) else None)
+        embed.title = target.display_name
+        embed.add_field(name="📈 Level", value=f"**{level}**", inline=True)
+        embed.add_field(name="⚡ XP", value=f"{into_level} / {need}", inline=True)
+        embed.add_field(name="💎 Coins", value=f"{int(row['coins'])} {coin}", inline=True)
+        embed.set_footer(text=f"Gesamt-XP: {int(row['xp'])}")
         if isinstance(target, discord.Member):
             embed.set_thumbnail(url=target.display_avatar.url)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="leaderboard", description="Top 10 nach XP.")
+    @app_commands.command(name="leaderboard", description="Zeigt die Top 10 Mitglieder nach Gesamt-XP.")
     @app_commands.guild_only()
     async def leaderboard(self, interaction: discord.Interaction) -> None:
         rows = self.db.leaderboard(interaction.guild_id, limit=10)
@@ -209,8 +256,9 @@ class LevelingCog(commands.Cog):
                 f"({int(r['xp'])} XP, {int(r['coins'])} {coin})"
             )
         embed = discord.Embed(
-            title="🏆 Leaderboard", description="\n".join(lines), color=0xFEE75C
+            title="🏆  Leaderboard", description="\n".join(lines), color=0xA3E635
         )
+        embed.set_footer(text="Top 10 nach XP · serverübergreifend")
         await interaction.response.send_message(embed=embed)
 
     # --- Mod-Befehlsgruppe /level ---------------------------------------------
@@ -233,11 +281,48 @@ class LevelingCog(commands.Cog):
             f"✅ Level-Up-Meldungen erscheinen jetzt in {channel.mention}.", ephemeral=True
         )
 
-    @level.command(name="give", description="Vergibt Coins an einen User.")
+    @level.command(
+        name="message",
+        description="Eigener Level-Up-Text (leer = Standard-Embed).",
+    )
+    @app_commands.describe(
+        text="Platzhalter: {user} {user_name} {level} {coins} {server}. Leer lassen = Standard.",
+    )
+    async def level_message(self, interaction: discord.Interaction, text: str = "") -> None:
+        msg = text.strip() or None
+        self.db.set_levelup_message(interaction.guild_id, msg)
+        if msg:
+            preview = render_levelup(msg, interaction.user, 5, 500, interaction.guild.name)
+            await interaction.response.send_message(
+                f"✅ Eigener Level-Up-Text gesetzt. Vorschau:\n>>> {preview}",
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            await interaction.response.send_message(
+                "✅ Level-Up-Text zurückgesetzt — es wird wieder das Standard-Embed verwendet.",
+                ephemeral=True,
+            )
+
+    @level.command(name="ping", description="Soll der User beim Level-Up gepingt werden?")
+    @app_commands.describe(aktiv="An = User wird benachrichtigt, Aus = stille Meldung.")
+    async def level_ping(self, interaction: discord.Interaction, aktiv: bool) -> None:
+        self.db.set_levelup_ping(interaction.guild_id, aktiv)
+        await interaction.response.send_message(
+            f"✅ Level-Up-Ping ist jetzt **{'an' if aktiv else 'aus'}**.", ephemeral=True
+        )
+
+    @level.command(name="coins", description="Vergibt oder entzieht Coins eines Users.")
     @app_commands.describe(user="Empfänger", amount="Anzahl Coins (auch negativ möglich)")
-    async def level_give(
+    async def level_coins(
         self, interaction: discord.Interaction, user: discord.Member, amount: int
     ) -> None:
+        raw_owners = os.environ.get("WEB_OWNER_IDS", "").replace(" ", "")
+        owner_ids = {int(value) for value in raw_owners.split(",") if value.isdigit()}
+        if interaction.user.id not in owner_ids:
+            await interaction.response.send_message(
+                "⛔ Nur globale Owner dürfen Guthaben ändern.", ephemeral=True,
+            )
+            return
         new_balance = self.db.add_coins(interaction.guild_id, user.id, amount)
         coin = self.coin(interaction.guild)
         await interaction.response.send_message(

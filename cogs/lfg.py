@@ -190,7 +190,6 @@ class LFGCog(commands.Cog):
 
     @lfg.command(name="setrole", description="Setzt die Rolle, die bei /lfg start gepingt wird.")
     @app_commands.default_permissions(manage_roles=True)
-    @app_commands.checks.has_permissions(manage_roles=True)
     @app_commands.describe(role="Die LFG-Ping-Rolle")
     async def setrole(self, interaction: discord.Interaction, role: discord.Role) -> None:
         self.db.set_lfg_role(interaction.guild_id, role.id)

@@ -1,9 +1,12 @@
-"""Spiel-Rewards: Sammelkarten fürs Spielen konfigurierter Spiele.
+"""Spiel-Rewards: Booster-Packs fürs Spielen konfigurierter Spiele.
 
-- Karten sind PRO SPIEL: spielt jemand Spiel X, droppen nur die (eigenen) Karten von X.
-- Hat ein Spiel keine Karten, droppt nichts (kein eingebautes Set mehr).
+- Rewards sind PRO SPIEL: spielt jemand Spiel X, gibt es Spiel-Booster für X.
+- Pro 30 Min Spielzeit gibt es 1 Spiel-Booster-Pack, max. 12/Tag (je Spiel einstellbar).
+- Der Pack landet im Inventar und wird vom User selbst mit `/booster opengame`
+  geöffnet → zieht dann eine Karte aus dem (eigenen) Kartenpool des Spiels.
+- Hat ein Spiel keine Karten, gibt es keine Packs (der Pack wäre leer).
 - Jede Karte hat eine eigene Bild-URL (Pflicht beim Anlegen).
-- Pro 30 Min Spielzeit gibt es 1 zufällige Karte, max. 12/Tag.
+- Das Booster-Emote ist pro Spiel im Webpanel einstellbar.
 - Erkennung via Presence (braucht das privilegierte Presence Intent).
 """
 
@@ -11,7 +14,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-import random
 import re
 import time
 
@@ -34,6 +36,13 @@ RARITIES: dict[str, dict] = {
     "mythic":    {"label": "Mythic",    "emoji": "🔴", "color": 0xE74C3C, "weight": 0.3},
 }
 RARITY_ORDER = ["mythic", "legendary", "epic", "rare", "uncommon", "common"]
+
+COIN_EMOJI_NAME = "YamiToken"
+COIN_FALLBACK = "🪙"
+
+
+def _fmt(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
 
 
 def build_game_catalog(db, guild_id: int, game: str | None) -> dict[str, tuple[str, str, str | None]]:
@@ -62,14 +71,6 @@ def _slug(game: str, name: str) -> str | None:
 
 def _today() -> str:
     return datetime.date.today().isoformat()
-
-
-def _roll_card(catalog: dict[str, tuple[str, str, str | None]]) -> str:
-    rarities = [r for r in RARITIES if any(c[1] == r for c in catalog.values())]
-    weights = [RARITIES[r]["weight"] for r in rarities]
-    rarity = random.choices(rarities, weights=weights, k=1)[0]
-    pool = [cid for cid, c in catalog.items() if c[1] == rarity]
-    return random.choice(pool)
 
 
 async def _card_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -202,9 +203,10 @@ class TradeView(discord.ui.View):
         *,
         initiator: discord.Member,
         partner: discord.Member,
-        initiator_card: str,
+        initiator_card: str | None,
         catalog: dict[str, tuple[str, str, str | None]],
         partner_options: list[discord.SelectOption],
+        coins: int = 0,
     ) -> None:
         super().__init__(timeout=120)
         self.cog = cog
@@ -213,29 +215,41 @@ class TradeView(discord.ui.View):
         self.initiator_card = initiator_card
         self.partner_card: str | None = None
         self.catalog = catalog
+        self.coins = coins  # Coins, die der Initiator zusätzlich an den Partner zahlt
         self.confirmed: set[int] = set()
         self.message: discord.Message | None = None
         self.finished = False
         self.add_item(TradeOfferSelect(partner_options))
 
-    def _label(self, cid: str | None) -> str:
+    def _label(self, cid: str | None, *, none_text: str = "_nichts_") -> str:
         if cid is None:
-            return "_noch nicht gewählt_"
+            return none_text
         name, rarity, _ = self.catalog.get(cid, (cid, "common", None))
         return f"{RARITIES[rarity]['emoji']} **{name}**"
+
+    def _initiator_offer(self) -> str:
+        coin = self.cog._coin(self.initiator.guild)
+        parts = []
+        if self.initiator_card is not None:
+            parts.append(self._label(self.initiator_card))
+        if self.coins > 0:
+            parts.append(f"**{_fmt(self.coins)}** {coin}")
+        return " + ".join(parts) if parts else "_nichts_"
 
     def embed(self) -> discord.Embed:
         def mark(uid: int) -> str:
             return "✅" if uid in self.confirmed else "⬜"
 
+        is_buy = self.initiator_card is None and self.coins > 0
         embed = discord.Embed(
-            title="🔄 Kartentausch",
+            title="🛒 Kartenkauf" if is_buy else "🔄 Kartentausch",
             description=(
-                f"{mark(self.initiator.id)} {self.initiator.mention} bietet: {self._label(self.initiator_card)}\n"
-                f"{mark(self.partner.id)} {self.partner.mention} bietet: {self._label(self.partner_card)}\n\n"
+                f"{mark(self.initiator.id)} {self.initiator.mention} bietet: {self._initiator_offer()}\n"
+                f"{mark(self.partner.id)} {self.partner.mention} bietet: "
+                f"{self._label(self.partner_card, none_text='_noch nicht gewählt_')}\n\n"
                 "Beide müssen **Annehmen** klicken. Eine neue Kartenwahl setzt die Bestätigungen zurück."
             ),
-            color=0x5865F2,
+            color=0x7C3AED,
         )
         return embed
 
@@ -274,24 +288,27 @@ class TradeView(discord.ui.View):
             return
         self.confirmed.add(interaction.user.id)
         if {self.initiator.id, self.partner.id}.issubset(self.confirmed):
-            ok = self.cog.db.trade_cards(
+            ok = self.cog.db.trade_with_coins(
                 interaction.guild_id, self.initiator.id, self.initiator_card,
-                self.partner.id, self.partner_card,
+                self.partner.id, self.partner_card, self.coins,
             )
             await self._finish()
             if ok:
+                coin = self.cog._coin(self.initiator.guild)
+                partner_gets = self._initiator_offer()
+                initiator_gets = self._label(self.partner_card)
                 done = discord.Embed(
-                    title="✅ Tausch abgeschlossen!",
+                    title="✅ Handel abgeschlossen!",
                     description=(
-                        f"{self.partner.mention} erhält {self._label(self.initiator_card)}\n"
-                        f"{self.initiator.mention} erhält {self._label(self.partner_card)}"
+                        f"{self.partner.mention} erhält {partner_gets}\n"
+                        f"{self.initiator.mention} erhält {initiator_gets}"
                     ),
                     color=0x2ECC71,
                 )
                 await interaction.response.edit_message(content=None, embed=done, view=self)
             else:
                 await interaction.response.edit_message(
-                    content="⚠️ Tausch fehlgeschlagen — jemand besitzt seine Karte nicht mehr.",
+                    content="⚠️ Handel fehlgeschlagen — jemandem fehlen Karte oder Coins.",
                     embed=None, view=self,
                 )
             return
@@ -301,8 +318,119 @@ class TradeView(discord.ui.View):
     async def decline(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self._finish()
         await interaction.response.edit_message(
-            content=f"❌ Tausch von {interaction.user.mention} abgebrochen.", embed=None, view=self
+            content=f"❌ Handel von {interaction.user.mention} abgebrochen.", embed=None, view=self
         )
+
+
+class ConfirmDiscardView(discord.ui.View):
+    """Sicherheitsabfrage vor dem Entfernen von Karten aus dem eigenen Inventar."""
+
+    def __init__(
+        self,
+        cog: "GameCardsCog",
+        *,
+        user_id: int,
+        card_id: str,
+        card_name: str,
+        amount: int | None,
+        owned: int,
+    ) -> None:
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user_id = user_id
+        self.card_id = card_id
+        self.card_name = card_name
+        self.amount = amount  # None = alle Exemplare
+        self.owned = owned
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Das ist nicht deine Aktion 🙂", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Entfernen", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        remaining = self.cog.db.remove_card(
+            interaction.guild_id, self.user_id, self.card_id, self.amount
+        )
+        removed = self.owned - remaining
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        rest = f" Verbleibend: **{remaining}×**." if remaining else ""
+        await interaction.response.edit_message(
+            content=f"🗑️ **{removed}× {self.card_name}** aus deiner Sammlung entfernt.{rest}",
+            embed=None, view=self,
+        )
+
+    @discord.ui.button(label="Abbrechen", emoji="↩️", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(content="↩️ Abgebrochen.", embed=None, view=self)
+
+
+class RewardServerSelect(discord.ui.Select):
+    """Auswahl, auf welchem Server der User Karten-Drop-Meldungen bekommt."""
+
+    def __init__(self, db, user_id: int, guilds: list[discord.Guild], current: int | None) -> None:
+        self.db = db
+        self.user_id = user_id
+        options = [
+            discord.SelectOption(
+                label="Automatisch (erster Server)",
+                value="auto",
+                description="Der Bot wählt selbst einen passenden Server.",
+                emoji="🎲",
+                default=current is None,
+            )
+        ]
+        for g in guilds[:24]:  # max. 25 Optionen inkl. "Automatisch"
+            options.append(
+                discord.SelectOption(
+                    label=g.name[:100],
+                    value=str(g.id),
+                    emoji="📨",
+                    default=g.id == current,
+                )
+            )
+        super().__init__(placeholder="Server für Drop-Meldungen wählen…", options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Das ist nicht deine Aktion 🙂", ephemeral=True)
+            return
+        choice = self.values[0]
+        if choice == "auto":
+            self.db.set_reward_notify_guild(self.user_id, None)
+            msg = "✅ Drop-Meldungen kommen jetzt **automatisch** (erster passender Server)."
+        else:
+            gid = int(choice)
+            self.db.set_reward_notify_guild(self.user_id, gid)
+            guild = interaction.client.get_guild(gid)
+            name = guild.name if guild else "diesem Server"
+            msg = (
+                f"✅ Drop-Meldungen bekommst du jetzt auf **{name}** — "
+                "sofern dort das gespielte Spiel als Reward-Spiel eingetragen ist."
+            )
+        self.disabled = True
+        await interaction.response.edit_message(content=msg, embed=None, view=self.view)
+
+
+class RewardServerView(discord.ui.View):
+    def __init__(self, db, user_id: int, guilds: list[discord.Guild], current: int | None) -> None:
+        super().__init__(timeout=120)
+        self.add_item(RewardServerSelect(db, user_id, guilds, current))
 
 
 class GameCardsCog(commands.Cog):
@@ -311,13 +439,22 @@ class GameCardsCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.db = bot.db  # type: ignore[attr-defined]
-        self.active: dict[tuple[int, int], tuple[float, str]] = {}  # key -> (start, game)
+        # Global pro User: ein Spiel wird nur EINMAL gezählt, egal auf wie vielen Servern.
+        # user_id -> (start, game, config_guild_id)  (config-Guild liefert Intervall/Cap/Channel)
+        self.active: dict[int, tuple[float, str, int]] = {}
 
     async def cog_load(self) -> None:
         self.settle_loop.start()
 
     def cog_unload(self) -> None:
         self.settle_loop.cancel()
+
+    def _coin(self, guild: discord.Guild | None) -> str:
+        if guild is not None:
+            emoji = discord.utils.get(guild.emojis, name=COIN_EMOJI_NAME)
+            if emoji is not None:
+                return str(emoji)
+        return COIN_FALLBACK
 
     def _embed_for(self, name: str, rarity: str, image_url: str | None, *, owned: int | None = None, prefix: str = "") -> discord.Embed:
         r = RARITIES.get(rarity, RARITIES["common"])
@@ -333,47 +470,76 @@ class GameCardsCog(commands.Cog):
 
     # --- Presence-Tracking ----------------------------------------------------
 
-    def _current_game(self, member: discord.Member) -> str | None:
-        games = set(self.db.list_reward_games(member.guild.id))
-        if not games:
+    def _tracked_game(self, member: discord.Member) -> tuple[str, discord.Guild] | None:
+        """Spielt der User ein Spiel, das auf IRGENDEINEM gemeinsamen Server als
+        Reward-Spiel eingetragen ist? Gibt (spiel_lower, config_guild) zurück.
+
+        Dadurch wird ein Spiel nur einmal gezählt, auch wenn der User auf mehreren
+        Servern ist — die erste Guild, die das Spiel trackt, liefert die Konfiguration."""
+        playing = [
+            act.name.lower()
+            for act in member.activities
+            if act.type == discord.ActivityType.playing and act.name
+        ]
+        if not playing:
             return None
-        for act in member.activities:
-            if act.type == discord.ActivityType.playing and act.name and act.name.lower() in games:
-                return act.name.lower()
+        pref = self.db.get_reward_notify_guild(member.id)  # Wunsch-Server (oder None)
+        fallback: tuple[str, discord.Guild] | None = None
+        for guild in self.bot.guilds:
+            if guild.get_member(member.id) is None:
+                continue
+            match = next(
+                (resolved for activity in playing if (resolved := self.db.match_reward_game(guild.id, activity))),
+                None,
+            )
+            if match is None:
+                continue
+            if guild.id == pref:  # Wunsch-Server trackt das Spiel → gewinnt
+                return match, guild
+            if fallback is None:
+                fallback = (match, guild)
+        return fallback
+
+    def _find_member(self, user_id: int) -> discord.Member | None:
+        for guild in self.bot.guilds:
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member
         return None
 
     @commands.Cog.listener()
     async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
-        if after.guild is None or after.bot:
+        if after.bot:
             return
-        key = (after.guild.id, after.id)
-        current = self._current_game(after)
+        info = self._tracked_game(after)  # (game, config_guild) oder None
         now = time.time()
-        if key in self.active:
-            start, game = self.active[key]
-            if current != game:  # gestoppt oder Spiel gewechselt
-                del self.active[key]
-                await self._credit(after.guild, after, now - start, game)
-                if current is not None:
-                    self.active[key] = (now, current)
-        elif current is not None:
-            self.active[key] = (now, current)
+        uid = after.id
+        if uid in self.active:
+            start, game, gid = self.active[uid]
+            new_game = info[0] if info else None
+            if new_game != game:  # gestoppt oder Spiel gewechselt
+                del self.active[uid]
+                guild = self.bot.get_guild(gid) or after.guild
+                await self._credit(guild, after, now - start, game)
+                if info is not None:
+                    self.active[uid] = (now, info[0], info[1].id)
+        elif info is not None:
+            self.active[uid] = (now, info[0], info[1].id)
 
     @tasks.loop(minutes=SETTLE_MINUTES)
     async def settle_loop(self) -> None:
         now = time.time()
-        for key in list(self.active):
-            guild = self.bot.get_guild(key[0])
-            member = guild.get_member(key[1]) if guild else None
-            start, game = self.active.get(key, (now, ""))
+        for uid in list(self.active):
+            start, game, gid = self.active.get(uid, (now, "", 0))
+            member = self._find_member(uid)
+            self.active.pop(uid, None)
             if member is None:
-                self.active.pop(key, None)
                 continue
-            current = self._current_game(member)
-            self.active.pop(key, None)
-            await self._credit(member.guild, member, now - start, game)
-            if current is not None:
-                self.active[key] = (now, current)
+            guild = self.bot.get_guild(gid) or member.guild
+            await self._credit(guild, member, now - start, game)
+            info = self._tracked_game(member)
+            if info is not None:
+                self.active[uid] = (now, info[0], info[1].id)
 
     @settle_loop.before_loop
     async def _before_settle(self) -> None:
@@ -385,26 +551,43 @@ class GameCardsCog(commands.Cog):
             return
         catalog = build_game_catalog(self.db, guild.id, game)
         if not catalog:
-            return  # keine Karten für dieses Spiel angelegt → nichts zu vergeben
+            return  # keine Karten für dieses Spiel angelegt → Pack wäre leer, nichts vergeben
         interval_min, daily_cap = self.db.get_reward_game(guild.id, game)
-        interval = max(1, interval_min) * 60  # Sekunden pro Karte
-        acc, day, cards_today = self.db.get_playtime(guild.id, member.id, game)
+        interval = max(1, interval_min) * 60  # Sekunden pro Booster-Pack
+        acc, day, granted_today = self.db.get_playtime(guild.id, member.id, game)
         today = _today()
         if day != today:
-            day, cards_today = today, 0
+            day, granted_today = today, 0
         acc += secs
-        granted: list[str] = []
-        while acc >= interval and cards_today < daily_cap:
+        granted = 0  # in dieser Runde erspielte Packs
+        while acc >= interval and granted_today < daily_cap:
             acc -= interval
-            cards_today += 1
-            cid = _roll_card(catalog)
-            self.db.add_card(guild.id, member.id, cid)
-            granted.append(cid)
-        if cards_today >= daily_cap:
+            granted_today += 1
+            granted += 1
+        if granted_today >= daily_cap:
             acc = min(acc, interval - 1)
-        self.db.set_playtime(guild.id, member.id, acc, day, cards_today, game)
-        if not granted:
+        self.db.set_playtime(guild.id, member.id, acc, day, granted_today, game)
+        if granted <= 0:
             return
+        # Statt direkter Karte gibt es jetzt Spiel-Booster-Packs, die der User selbst öffnet.
+        from cogs.booster import resolve_booster_emoji
+
+        from cogs.uiembeds import reward_embed, LIME
+
+        pack_type = "game:" + (game or "").strip().lower()
+        total = self.db.add_packs(guild.id, member.id, pack_type, granted)
+        emote = resolve_booster_emoji(guild, self.db, game or "")
+        embed = reward_embed(
+            badge="⚡  REWARD FREIGESCHALTET",
+            title=f"{emote}  +{granted} Spiel-Booster",
+            member=member,
+            description=f"**{member.display_name}** hat durchs Spielen einen Drop erhalten.",
+            game=game,
+            total=total,
+            total_label="Booster im Inventar",
+            hint=f"Öffnen mit `/booster opengame spiel:{game}`",
+            color=LIME,
+        )
         # Ziel: konfigurierter Karten-Channel (öffentlich), sonst DM an den User.
         channel = None
         chan_id = self.db.get_card_channel(guild.id)
@@ -412,23 +595,16 @@ class GameCardsCog(commands.Cog):
             ch = guild.get_channel(chan_id)
             if isinstance(ch, discord.abc.Messageable):
                 channel = ch
-        for cid in granted:
-            name, rarity, url = catalog[cid]
-            embed = self._embed_for(name, rarity, url, prefix="🎴 Neue Karte! ")
-            if channel is not None:
-                try:
-                    await channel.send(
-                        content=f"🎴 {member.mention} hat eine Karte erspielt!",
-                        embed=embed,
-                        allowed_mentions=discord.AllowedMentions(users=True),
-                    )
-                    continue
-                except discord.Forbidden:
-                    pass  # fällt unten auf DM zurück
+        if channel is not None:
             try:
-                await member.send(embed=embed)
-            except discord.HTTPException:
-                pass
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                return
+            except discord.Forbidden:
+                pass  # fällt auf DM zurück
+        try:
+            await member.send(embed=embed)
+        except discord.HTTPException:
+            pass
 
     # --- Sammlungs-Commands ---------------------------------------------------
 
@@ -440,7 +616,8 @@ class GameCardsCog(commands.Cog):
         collection = self.db.get_collection(interaction.guild_id, target.id)
         if not collection:
             await interaction.response.send_message(
-                f"{target.display_name} hat noch keine Karten. Spiel ein konfiguriertes Spiel, um welche zu erspielen! 🎴",
+                f"{target.display_name} hat noch keine Karten. Spiel ein konfiguriertes Spiel, "
+                f"erspiel dir Booster und öffne sie mit `/booster opengame`! 🎴",
                 ephemeral=True,
             )
             return
@@ -477,30 +654,95 @@ class GameCardsCog(commands.Cog):
         owned = self.db.get_collection(interaction.guild_id, interaction.user.id).get(card_id, 0)
         await interaction.response.send_message(embed=self._embed_for(name, rarity, url, owned=owned))
 
-    @app_commands.command(name="trade", description="Tausche eine Karte mit einem anderen Mitglied.")
+    @app_commands.command(name="discard", description="Entfernt Karten aus deiner Sammlung.")
     @app_commands.guild_only()
-    @app_commands.describe(user="Mit wem möchtest du tauschen?", karte="Welche deiner Karten bietest du an?")
+    @app_commands.describe(
+        karte="Welche Karte entfernen?",
+        anzahl="Wie viele Exemplare? (Standard: alle)",
+    )
     @app_commands.autocomplete(karte=_owned_card_autocomplete)
-    async def trade(self, interaction: discord.Interaction, user: discord.Member, karte: str) -> None:
-        if user.bot or user.id == interaction.user.id:
-            await interaction.response.send_message(
-                "⚠️ Du kannst nur mit anderen Mitgliedern tauschen.", ephemeral=True
-            )
-            return
+    async def discard(
+        self,
+        interaction: discord.Interaction,
+        karte: str,
+        anzahl: app_commands.Range[int, 1, 100000] | None = None,
+    ) -> None:
         catalog = build_full_catalog(self.db, interaction.guild_id)
-        # Eigene Karte validieren (per ID oder Name).
         card_id = karte if karte in catalog else next(
             (cid for cid, (name, _, _) in catalog.items() if name.lower() == karte.lower()), None
         )
-        if card_id is None or self.db.get_collection(interaction.guild_id, interaction.user.id).get(card_id, 0) < 1:
+        owned = self.db.get_collection(interaction.guild_id, interaction.user.id).get(card_id, 0) if card_id else 0
+        if card_id is None or owned < 1:
             await interaction.response.send_message(
                 "⚠️ Diese Karte besitzt du nicht.", ephemeral=True
             )
             return
+        name, rarity, url = catalog[card_id]
+        amount = owned if anzahl is None else min(anzahl, owned)
+        view = ConfirmDiscardView(
+            self, user_id=interaction.user.id, card_id=card_id, card_name=name,
+            amount=None if anzahl is None else amount, owned=owned,
+        )
+        await interaction.response.send_message(
+            content=f"⚠️ Wirklich **{amount}× {name}** aus deiner Sammlung entfernen? "
+                    "Das kann nicht rückgängig gemacht werden.",
+            embed=self._embed_for(name, rarity, url, owned=owned),
+            view=view, ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    @app_commands.command(
+        name="trade",
+        description="Tausche oder kaufe eine Karte — optional mit Tokens drauf.",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        user="Mit wem möchtest du handeln?",
+        karte="Optional: welche deiner Karten bietest du an?",
+        tokens="Optional: wie viele Coins legst du drauf / bietest du für den Kauf?",
+    )
+    @app_commands.autocomplete(karte=_owned_card_autocomplete)
+    async def trade(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        karte: str | None = None,
+        tokens: app_commands.Range[int, 0, 1_000_000_000] = 0,
+    ) -> None:
+        if user.bot or user.id == interaction.user.id:
+            await interaction.response.send_message(
+                "⚠️ Du kannst nur mit anderen Mitgliedern handeln.", ephemeral=True
+            )
+            return
+        if karte is None and tokens <= 0:
+            await interaction.response.send_message(
+                "⚠️ Biete eine **Karte**, **Tokens** oder beides an.", ephemeral=True
+            )
+            return
+        catalog = build_full_catalog(self.db, interaction.guild_id)
+        card_id: str | None = None
+        if karte is not None:
+            card_id = karte if karte in catalog else next(
+                (cid for cid, (name, _, _) in catalog.items() if name.lower() == karte.lower()), None
+            )
+            if card_id is None or self.db.get_collection(interaction.guild_id, interaction.user.id).get(card_id, 0) < 1:
+                await interaction.response.send_message(
+                    "⚠️ Diese Karte besitzt du nicht.", ephemeral=True
+                )
+                return
+        coin = self._coin(interaction.guild)
+        if tokens > 0:
+            balance = int(self.db.get_user(interaction.guild_id, interaction.user.id)["coins"])
+            if balance < tokens:
+                await interaction.response.send_message(
+                    f"⚠️ Du hast nur **{_fmt(balance)}** {coin}, willst aber **{_fmt(tokens)}** anbieten.",
+                    ephemeral=True,
+                )
+                return
         partner_collection = self.db.get_collection(interaction.guild_id, user.id)
         if not partner_collection:
             await interaction.response.send_message(
-                f"⚠️ {user.display_name} hat noch keine Karten zum Tauschen.", ephemeral=True
+                f"⚠️ {user.display_name} hat noch keine Karten zum Handeln.", ephemeral=True
             )
             return
         options: list[discord.SelectOption] = []
@@ -513,14 +755,47 @@ class GameCardsCog(commands.Cog):
         options = options[:25]
         view = TradeView(
             self, initiator=interaction.user, partner=user,
-            initiator_card=card_id, catalog=catalog, partner_options=options,
+            initiator_card=card_id, catalog=catalog, partner_options=options, coins=tokens,
         )
+        verb = "kaufen" if card_id is None else "handeln"
         await interaction.response.send_message(
-            content=f"🔄 {user.mention}, {interaction.user.mention} möchte mit dir tauschen!",
+            content=f"🔄 {user.mention}, {interaction.user.mention} möchte mit dir {verb}!",
             embed=view.embed(), view=view,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
         view.message = await interaction.original_response()
+
+    @app_commands.command(
+        name="rewardserver",
+        description="Wähle, auf welchem Server du deine Karten-Drop-Meldungen bekommst.",
+    )
+    async def rewardserver(self, interaction: discord.Interaction) -> None:
+        uid = interaction.user.id
+        guilds = [
+            g for g in self.bot.guilds
+            if g.get_member(uid) is not None and self.db.list_reward_games(g.id)
+        ]
+        if not guilds:
+            await interaction.response.send_message(
+                "Auf keinem deiner gemeinsamen Server sind Reward-Spiele eingerichtet — "
+                "es gibt also nichts auszuwählen.",
+                ephemeral=True,
+            )
+            return
+        current = self.db.get_reward_notify_guild(uid)
+        embed = discord.Embed(
+            title="📨 Benachrichtigungs-Server",
+            description=(
+                "Wenn du ein Spiel spielst, das auf mehreren deiner Server als Reward-Spiel "
+                "eingetragen ist, bekommst du den Drop nur **einmal**. Hier wählst du, welcher "
+                "Server die Meldung zeigt (bzw. dir per DM schickt).\n\n"
+                "Trackt dein Wunsch-Server das gespielte Spiel gerade nicht, fällt der Bot "
+                "automatisch auf einen passenden Server zurück."
+            ),
+            color=0x7C3AED,
+        )
+        view = RewardServerView(self.db, uid, guilds, current)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     # --- Mod-Konfiguration /gamereward ----------------------------------------
 
@@ -537,8 +812,8 @@ class GameCardsCog(commands.Cog):
     )
     @app_commands.describe(
         spiel="Exakter Spielname (wie in Discord angezeigt), z.B. League of Legends",
-        intervall="Minuten Spielzeit pro Karte (Standard 30)",
-        tageslimit="Maximale Karten pro Tag (Standard 12)",
+        intervall="Minuten Spielzeit pro Booster-Pack (Standard 30)",
+        tageslimit="Maximale Booster pro Tag (Standard 12)",
     )
     async def addgame(
         self,
@@ -552,9 +827,10 @@ class GameCardsCog(commands.Cog):
             "\n⚠️ **Presence Intent ist aus** — der Bot kann noch nicht erkennen, wer spielt."
         )
         await interaction.response.send_message(
-            f"✅ **{spiel}** eingetragen: 1 Karte pro **{intervall} Min**, max. **{tageslimit}/Tag**.\n"
+            f"✅ **{spiel}** eingetragen: 1 Booster pro **{intervall} Min**, max. **{tageslimit}/Tag**.\n"
             f"Lege jetzt Karten an: `/gamereward addcard spiel:{spiel} …` "
-            f"(ohne Karten gibt es keine Drops).{note}",
+            f"(ohne Karten wäre der Booster leer, daher gibt es ohne Karten keine Drops).\n"
+            f"Booster-Emote pro Spiel stellst du im Webpanel ein.{note}",
             ephemeral=True,
         )
 
@@ -570,17 +846,75 @@ class GameCardsCog(commands.Cog):
     @gamereward.command(name="listgames", description="Zeigt alle Belohnungs-Spiele.")
     async def listgames(self, interaction: discord.Interaction) -> None:
         games = self.db.list_reward_games_full(interaction.guild_id)
+        aliases = self.db.list_reward_game_aliases(interaction.guild_id)
+        aliases_by_game: dict[str, list[str]] = {}
+        for alias, game in aliases:
+            aliases_by_game.setdefault(game, []).append(alias)
         status = "🟢 aktiv" if self.bot.intents.presences else "🔴 Presence Intent aus"
+
+        def _line(g: str, iv: int, cap: int, emoji: str | None) -> str:
+            from cogs.booster import resolve_booster_emoji
+            em = resolve_booster_emoji(interaction.guild, self.db, g)
+            alias_txt = ""
+            if aliases_by_game.get(g):
+                alias_txt = "\n  ↳ Alias: " + ", ".join(f"`{a}`" for a in aliases_by_game[g])
+            return f"• {em} **{g}** — 1 Booster / {iv} Min · max. {cap}/Tag{alias_txt}"
+
         text = (
-            "\n".join(f"• **{g}** — 1 Karte / {iv} Min · max. {cap}/Tag" for g, iv, cap in games)
+            "\n".join(_line(g, iv, cap, emoji) for g, iv, cap, emoji in games)
             if games else "_keine eingetragen_"
         )
         embed = discord.Embed(
-            title="🎮 Karten-Belohnungs-Spiele",
+            title="🎮 Booster-Belohnungs-Spiele",
             description=f"{text}\n\nTracking: {status}",
-            color=0x5865F2,
+            color=0x7C3AED,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @gamereward.command(
+        name="addalias",
+        description="Fügt einem Reward-Spiel einen zweiten Discord-Aktivitätsnamen hinzu.",
+    )
+    @app_commands.describe(
+        spiel="Das echte Reward-Spiel, dessen Karten/Booster vergeben werden sollen",
+        alias="Zusätzlicher Discord-Name, z.B. Valorant Tracker",
+    )
+    @app_commands.autocomplete(spiel=_game_autocomplete)
+    async def addalias(self, interaction: discord.Interaction, spiel: str, alias: str) -> None:
+        spiel = spiel.strip()
+        alias = alias.strip()
+        if not spiel or not alias:
+            await interaction.response.send_message("⚠️ Spiel und Alias dürfen nicht leer sein.", ephemeral=True)
+            return
+        if not self.db.is_reward_game(interaction.guild_id, spiel):
+            await interaction.response.send_message(
+                f"⚠️ **{spiel}** ist noch kein Reward-Spiel. Lege es zuerst mit `/gamereward addgame` an.",
+                ephemeral=True,
+            )
+            return
+        if spiel.lower() == alias.lower():
+            await interaction.response.send_message(
+                "⚠️ Der Alias ist identisch mit dem Spielnamen — dafür brauchst du keinen Alias.",
+                ephemeral=True,
+            )
+            return
+        self.db.add_reward_game_alias(interaction.guild_id, spiel, alias)
+        await interaction.response.send_message(
+            f"✅ **{alias}** zählt jetzt als **{spiel}**. Drops verwenden weiter die Karten und Booster von **{spiel}**.",
+            ephemeral=True,
+        )
+
+    @gamereward.command(
+        name="removealias",
+        description="Entfernt einen zusätzlichen Discord-Aktivitätsnamen.",
+    )
+    @app_commands.describe(alias="Der zu entfernende Alias, z.B. Valorant Tracker")
+    async def removealias(self, interaction: discord.Interaction, alias: str) -> None:
+        alias = alias.strip()
+        if self.db.remove_reward_game_alias(interaction.guild_id, alias):
+            await interaction.response.send_message(f"🗑️ Alias **{alias}** entfernt.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"⚠️ Alias **{alias}** war nicht eingetragen.", ephemeral=True)
 
     @gamereward.command(name="setchannel", description="Channel für Karten-Drop-Meldungen (ohne Angabe: DMs).")
     @app_commands.describe(channel="Zielchannel — ohne Angabe gehen Drops wieder per DM raus")
@@ -646,6 +980,46 @@ class GameCardsCog(commands.Cog):
                 ephemeral=True,
             )
 
+    @gamereward.command(
+        name="givecard",
+        description="Vergibt eine Karte direkt an ein Mitglied (z. B. für Giveaways).",
+    )
+    @app_commands.describe(
+        user="Wer bekommt die Karte?",
+        karte="Welche Karte vergeben?",
+        anzahl="Wie viele Exemplare? (Standard 1)",
+    )
+    @app_commands.autocomplete(karte=_custom_card_autocomplete)
+    async def givecard(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        karte: str,
+        anzahl: app_commands.Range[int, 1, 100] = 1,
+    ) -> None:
+        if user.bot:
+            await interaction.response.send_message(
+                "⚠️ An Bots kannst du keine Karten vergeben.", ephemeral=True
+            )
+            return
+        catalog = build_full_catalog(self.db, interaction.guild_id)
+        # Karte per ID oder Name auflösen.
+        card_id = karte if karte in catalog else next(
+            (cid for cid, (name, _, _) in catalog.items() if name.lower() == karte.lower()), None
+        )
+        if card_id is None:
+            await interaction.response.send_message("⚠️ Diese Karte gibt es nicht.", ephemeral=True)
+            return
+        new_count = self.db.add_card(interaction.guild_id, user.id, card_id, anzahl)
+        name, rarity, url = catalog[card_id]
+        amount_txt = "" if anzahl == 1 else f" ×{anzahl}"
+        embed = self._embed_for(name, rarity, url, owned=new_count, prefix="🎁 Geschenk-Karte! ")
+        await interaction.response.send_message(
+            content=f"🎁 {user.mention} erhält **{name}**{amount_txt} von {interaction.user.mention}!",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+
     @gamereward.command(name="listcards", description="Zeigt die Karten eines Spiels.")
     @app_commands.describe(spiel="Welches Spiel?")
     @app_commands.autocomplete(spiel=_game_autocomplete)
@@ -666,7 +1040,7 @@ class GameCardsCog(commands.Cog):
             for r in RARITY_ORDER if r in by_rar
         ]
         embed = discord.Embed(
-            title=f"🎴 Karten von {spiel}", description="\n".join(lines), color=0x5865F2
+            title=f"🎴 Karten von {spiel}", description="\n".join(lines), color=0x7C3AED
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

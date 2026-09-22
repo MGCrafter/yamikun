@@ -1,17 +1,60 @@
-# Bot-Konfiguration (enthält Channel- & Message-IDs, lokaler Laufzeit-Zustand)
-config.json
-
-# SQLite-Datenbank (Leveling, Announcer) + WAL-Dateien
-bot.db
-bot.db-wal
-bot.db-shm
-
-# Secrets
+# Secrets: nur die leere Vorlage gehört ins Repository.
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 
-# Hochgeladene Karten-Bilder (Web-Panel)
-static/
+# Lokale Laufzeitdaten, Uploads und Sicherungen
+/config.json
+*.db
+*.db-*
+*.db.*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.sqlite.*
+*.sqlite3.*
+/static/
+/data/
+/backups/
 
-# Python
+# Lokale Archive, Agent-Metadaten und Deploy-Pakete
+/.local/
+/.hermes/
+/.codex/
+/TMP for Caprover Tarballs/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bak
+*.log
+
+# Python-Umgebungen und Test-Caches
+.venv/
+venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Frontend: Docker baut aus Quellcode und package-lock.json.
+node_modules/
+/frontend/dist/
+*.tsbuildinfo
+/frontend/vite.config.js
+/frontend/vite.config.d.ts
+
+# Editor / Betriebssystem
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*~

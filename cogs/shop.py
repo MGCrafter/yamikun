@@ -20,6 +20,8 @@ logger = logging.getLogger("oaken-tower-bot")
 
 COIN_EMOJI_NAME = "YamiToken"
 COIN_FALLBACK = "🪙"
+BOOSTER_EMOJI_NAME = "Yamicard_booster"  # Server-Emote für die allgemeinen Booster-Packs
+BOOSTER_FALLBACK = "🎴"
 
 # Item-Parameter (zentral, leicht anpassbar)
 LUCK_PRICE = 20000
@@ -46,13 +48,20 @@ class ShopCog(commands.Cog):
                 return str(emoji)
         return COIN_FALLBACK
 
-    @app_commands.command(name="shop", description="Zeigt den Shop.")
+    def _booster_emoji(self, guild: discord.Guild | None) -> str:
+        if guild is not None:
+            emoji = discord.utils.get(guild.emojis, name=BOOSTER_EMOJI_NAME)
+            if emoji is not None:
+                return str(emoji)
+        return BOOSTER_FALLBACK
+
+    @app_commands.command(name="shop", description="Zeigt kaufbare Boosts und Booster-Packs im Überblick.")
     @app_commands.guild_only()
     async def shop(self, interaction: discord.Interaction) -> None:
         coin = self._coin(interaction.guild)
         embed = discord.Embed(
             title="🛒 Shop",
-            color=0x9B59B6,
+            color=0x7C3AED,
             description="Kaufe mit `/buy <item>`.",
         )
         embed.add_field(
@@ -65,17 +74,39 @@ class ShopCog(commands.Cog):
             value=f"**Doppelte XP** (Nachrichten & Voice) für **{XP_DURATION // 60} Minuten**.\n`/buy item:XP-Boost`",
             inline=False,
         )
-        from cogs.booster import PACKS  # lokal, um Import-Reihenfolge unkritisch zu halten
+        # lokal importieren, um die Import-Reihenfolge unkritisch zu halten
+        from cogs.booster import PACKS, GAMECARD_PACK, resolve_booster_emoji
 
+        booster_emote = self._booster_emoji(interaction.guild)
         packs_text = "\n".join(
-            f"{p['emoji']} **{p['label']}** — {_fmt(p['price'])} {coin} ({p['cards']} Karten)"
+            f"{booster_emote} **{p['label']}** — {_fmt(p['price'])} {coin} ({p['cards']} Karten)"
             for p in PACKS.values()
         )
         embed.add_field(
-            name="🎴 Booster-Packs",
+            name=f"{booster_emote} Booster-Packs",
             value=f"{packs_text}\nKaufen mit `/booster buy`, öffnen mit `/booster open`.",
             inline=False,
         )
+
+        # Spiel-Booster pro Spiel — nur Spiele, für die es Karten gibt (sonst nicht kaufbar).
+        games = sorted({
+            g for _cid, _n, _r, _u, g in self.db.list_custom_cards(interaction.guild_id) if g
+        })
+        if games:
+            game_lines = "\n".join(
+                f"{resolve_booster_emoji(interaction.guild, self.db, g)} **{g}** — "
+                f"{_fmt(GAMECARD_PACK['price'])} {coin} ({GAMECARD_PACK['cards']} Karten)"
+                for g in games
+            )
+            embed.add_field(
+                name=f"{booster_emote} Spiel-Booster (pro Spiel)",
+                value=(
+                    f"{game_lines}\n"
+                    f"Kaufen mit `/booster buygame spiel:<Spiel>`, öffnen mit `/booster opengame`.\n"
+                    f"_Oder einfach durchs Spielen erspielen!_"
+                ),
+                inline=False,
+            )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="buy", description="Kaufe ein Item aus dem Shop.")
@@ -95,14 +126,14 @@ class ShopCog(commands.Cog):
         price = LUCK_PRICE if item.value == "luck" else XP_PRICE
 
         balance = int(self.db.get_user(gid, uid)["coins"])
-        if balance < price:
+        # Preis atomar abbuchen (nur wenn das Guthaben reicht) – verhindert Races.
+        if not self.db.spend_coins(gid, uid, price):
             await interaction.response.send_message(
                 f"⚠️ Du hast nur **{_fmt(balance)}** {coin}, brauchst aber **{_fmt(price)}**.",
                 ephemeral=True,
             )
             return
 
-        self.db.add_coins(gid, uid, -price)
         if item.value == "luck":
             self.db.add_charges(gid, uid, "luck", LUCK_CHARGES)
             total = self.db.get_charges(gid, uid, "luck")

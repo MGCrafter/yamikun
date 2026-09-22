@@ -15,7 +15,9 @@ CATEGORIES: dict[str, dict] = {
         "commands": [
             ("/coinflip <head/tail> <einsatz>", "Münzwurf — bei richtigem Tipp Einsatz verdoppelt (48 %)."),
             ("/blackjack <einsatz>", "Blackjack gegen den Dealer (Hit/Stand/Double/Split, BJ 3:2)."),
+            ("/blackjackduel @gegner <einsatz>", "1v1-Blackjack: Beide setzen denselben Betrag, wer die höhere Hand hat, gewinnt."),
             ("/slots <einsatz>", "3-Walzen-Slot, nur drei Gleiche gewinnen (Jackpot 🪙 ×100)."),
+            ("/roulette <einsatz> <art> [zahl]", "Europäisches Roulette: Rot/Schwarz, Dutzend, Spalte, Einzelzahl (×2–×36)."),
         ],
     },
     "economy": {
@@ -36,9 +38,11 @@ CATEGORIES: dict[str, dict] = {
         "commands": [
             ("/rank [user]", "Level, XP-Fortschritt und Coins."),
             ("/leaderboard", "Top 10 nach XP."),
-            ("/profile [user]", "Profilseite: Level, Coins, Rang, Statistiken, Titel, Ehen, Bio."),
+            ("/profile [user]", "Profilseite: Level, Coins, Rang, Statistiken, Titel, Ehen, Bio. Lieblingskarten je Spiel mit ◀/▶ durchblättern."),
             ("/setbio <text>", "Eigene Profil-Bio setzen."),
             ("/setcolor <hex>", "Profil-Akzentfarbe wählen (z.B. #FF8800)."),
+            ("/setfavcard <karte>", "Lieblingskarte für ein Spiel setzen — eine je Spiel (oder ⭐-Button im /profile)."),
+            ("/achievements [freund]", "Quests, Fortschritt und geheime Achievements ansehen — inklusive Website-Vergleich."),
             ("/title list / set / clear", "XP-Titel anzeigen und auswählen (durch Level freischaltbar)."),
         ],
     },
@@ -66,10 +70,16 @@ CATEGORIES: dict[str, dict] = {
     "cards": {
         "emoji": "🎴",
         "title": "Sammelkarten",
-        "short": "Karten erspielen & sammeln",
+        "short": "Karten erspielen, tauschen, sammeln",
         "commands": [
-            ("/gamecards [user]", "Deine erspielten Sammelkarten."),
+            ("/gamecards [user]", "Deine erspielten Sammelkarten (serverübergreifend)."),
             ("/gamecard <karte>", "Zeigt eine einzelne erspielte Karte (Bild & Seltenheit)."),
+            ("/trade @user [karte] [tokens]", "Karten tauschen — oder mit Coins kaufen/draufzahlen."),
+            ("/discard <karte> [anzahl]", "Karten aus deiner Sammlung entfernen."),
+            ("/rewardserver", "Wähle, auf welchem Server du Karten-Drop-Meldungen bekommst (bei mehreren Servern)."),
+            ("/fuse cards <spiel> <seltenheit>", "5 Karten einer Seltenheit → 1 der nächsten (bis Legendary)."),
+            ("/fuse yami <seltenheit>", "Yami-Karten fusionieren (5 → 1 höher)."),
+            ("Web-Dashboard", "Auf der Webseite einloggen → eigene Sammlung, Fusion & Profil ansehen."),
         ],
     },
     "booster": {
@@ -77,8 +87,10 @@ CATEGORIES: dict[str, dict] = {
         "title": "Booster & Yami-Karten",
         "short": "Packs kaufen, öffnen, sammeln",
         "commands": [
-            ("/booster buy <typ> [anzahl]", "Booster-Packs mit Coins kaufen."),
-            ("/booster open <typ>", "Ein Pack öffnen → zufällige Karten."),
+            ("/booster buy <typ> [anzahl]", "Yami-Booster-Packs mit Coins kaufen."),
+            ("/booster open <typ> [anzahl]", "Yami-Pack(s) öffnen — einzeln aufdecken (seltenste zuletzt) oder mehrere auf einmal."),
+            ("/booster buygame <spiel> [anzahl]", "Spiel-Booster kaufen (200.000 Coins, Karten eines Spiels)."),
+            ("/booster opengame <spiel> [anzahl]", "Spiel-Booster öffnen (→ /gamecards) — mehrere möglich, mit Godpack-Chance! ✨"),
             ("/booster packs", "Deine ungeöffneten Packs."),
             ("/booster collection [user]", "Deine Yami-Karten-Sammlung."),
             ("/booster card <karte>", "Eine Yami-Karte ansehen."),
@@ -96,17 +108,39 @@ CATEGORIES: dict[str, dict] = {
             ("/summondemon", "Beschwöre Yami — glücklich oder erzürnt? (Cooldown)"),
         ],
     },
+    "tickets": {
+        "emoji": "🎫",
+        "title": "Tickets & Support",
+        "short": "Privater Support per Ticket",
+        "commands": [
+            ("Ticket-Panel", "Im konfigurierten Channel ein Thema wählen → privater Ticket-Thread öffnet sich."),
+            ("/ticket close", "Schließt das Ticket (Ersteller, zuständiger Bearbeiter oder Admin) — mit Web-Transcript."),
+            ("/ticket claim", "Support übernimmt das aktuelle Ticket (sichtbar, wer zuständig ist)."),
+            ("/ticket add @user", "Jemanden zum aktuellen Ticket hinzufügen (Support)."),
+            ("/ticket panel [#channel]", "Panel posten/erneuern & System aktivieren (Mods)."),
+            ("/ticket setrole @rolle · /ticket setlog [#channel]", "Support-Rolle & Transcript-Channel setzen (Mods)."),
+            ("/ticket category add/remove/list", "Themen (Panel-Optionen) verwalten (Mods) — auch im Webpanel."),
+        ],
+    },
     "admin": {
         "emoji": "🛠️",
         "title": "Moderation & Admin",
         "short": "Nur für Mods/Admins",
         "commands": [
             ("/purge <anzahl> [user]", "Löscht 1–100 Nachrichten (optional nur eines Users)."),
-            ("/say <text> [channel]", "Lässt den Bot eine Nachricht schreiben."),
+            ("/say <text> [channel]", "Lässt den Bot eine Nachricht schreiben (\\n = Zeilenumbruch)."),
+            ("/reactionrole add / remove / list", "Reaktions-Rollen verwalten (auch im Webpanel)."),
+            ("Willkommensnachrichten", "Begrüßung neuer Mitglieder inkl. Banner-Bild — im Webpanel."),
+            ("Audit-Log", "Server-Ereignisse protokollieren (Nachrichten, Voice, Mitglieder, Rollen, Channels) — im Webpanel."),
             ("/level setchannel #channel", "Channel für Level-Up-Meldungen."),
-            ("/level give @user <coins>", "Coins vergeben/entziehen."),
+            ("/level message [text]", "Eigener Level-Up-Text (Platzhalter; leer = Standard) — auch im Webpanel."),
+            ("/level ping <an/aus>", "Ob der User beim Aufstieg gepingt wird — auch im Webpanel."),
+            ("/level coins @user <coins>", "Coins vergeben/entziehen."),
+            ("Bot-Serverprofil", "Nickname & Avatar des Bots pro Server — im Webpanel."),
+            ("Nachricht senden", "Bot-Nachricht (Text/Embed) in einen Channel schicken — im Webpanel."),
             ("/gamereward addgame / removegame / listgames", "Spiele für Karten-Rewards verwalten."),
             ("/gamereward addcard / removecard / listcards", "Karten pro Spiel anlegen/entfernen/anzeigen."),
+            ("/gamereward givecard @user <karte> [anzahl]", "Karte direkt an ein Mitglied vergeben (Giveaways)."),
             ("/gamereward setchannel [#channel]", "Channel für Karten-Drop-Meldungen (sonst DM)."),
             ("/yamicard add / remove / list", "Yami-Karten (für Booster-Packs) verwalten."),
         ],
@@ -132,7 +166,7 @@ def _category_embed(bot_name: str, key: str) -> discord.Embed:
     return discord.Embed(
         title=f"{cat['emoji']} {cat['title']}",
         description="\n\n".join(lines),
-        color=0x5865F2,
+        color=0x7C3AED,
     ).set_footer(text=f"{bot_name} · /help")
 
 
@@ -141,7 +175,7 @@ def _overview_embed(bot_name: str) -> discord.Embed:
     return discord.Embed(
         title=f"📖 {bot_name} — Hilfe",
         description="Wähle unten eine Kategorie ▼\n\n" + "\n".join(lines),
-        color=0x5865F2,
+        color=0x7C3AED,
     ).set_footer(text="Tipp: Tippe „/“ im Chat, um alle Commands direkt zu sehen.")
 
 

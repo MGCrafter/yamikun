@@ -6,6 +6,7 @@ Mehrere Ehen gleichzeitig sind erlaubt. Hochzeits-GIF kommt von nekos.best.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from typing import Optional
 
@@ -14,11 +15,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs.nekos import fetch_gif_file
+
 logger = logging.getLogger("oaken-tower-bot")
 
 MARRY_GIF_CATEGORY = "kiss"   # nekos.best-Kategorie fürs Hochzeits-GIF
 REJECT_GIF_CATEGORY = "cry"   # GIF bei Ablehnung
-NEKOS_URL = "https://nekos.best/api/v2/{}"
+# Pro Abruf liefert nekos.best ein zufälliges GIF aus seiner jeweiligen Bibliothek.
+# Mehrere Kategorien verhindern zusätzlich, dass abgelaufene Anträge monoton wirken.
+ABANDONED_GIF_CATEGORIES = ("cry", "pout", "stare", "facepalm", "shrug")
 
 
 class ProposalView(discord.ui.View):
@@ -44,6 +49,7 @@ class ProposalView(discord.ui.View):
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.done = True
         self.cog.db.add_marriage(interaction.guild_id, self.proposer.id, self.target.id, time.time())
+        await interaction.response.defer()
         gif = await self.cog._fetch_gif(MARRY_GIF_CATEGORY)
         embed = discord.Embed(
             title="💖 Eine Hochzeit! 🎉",
@@ -51,40 +57,62 @@ class ProposalView(discord.ui.View):
             color=0xFF6FA5,
         )
         if gif:
-            embed.set_image(url=gif)
+            embed.set_image(url=f"attachment://{gif.filename}")
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        await interaction.edit_original_response(
+            content=None, embed=embed, view=self, attachments=[gif] if gif else []
+        )
         self.stop()
 
     @discord.ui.button(label="Nein…", style=discord.ButtonStyle.secondary, emoji="💔")
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.done = True
+        await interaction.response.defer()
         gif = await self.cog._fetch_gif(REJECT_GIF_CATEGORY)
         embed = discord.Embed(
             description=f"💔 {self.target.mention} hat den Antrag von {self.proposer.mention} (vorerst) abgelehnt.",
             color=0x95A5A6,
         )
         if gif:
-            embed.set_image(url=gif)
+            embed.set_image(url=f"attachment://{gif.filename}")
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        await interaction.edit_original_response(
+            content=None, embed=embed, view=self, attachments=[gif] if gif else []
+        )
         self.stop()
 
     async def on_timeout(self) -> None:
         if self.done or self.message is None:
             return
+        self.done = True
         for child in self.children:
             child.disabled = True
+        gif = await self.cog._fetch_gif(secrets.choice(ABANDONED_GIF_CATEGORIES))
         embed = discord.Embed(
-            description=f"⌛ Der Antrag von {self.proposer.mention} an {self.target.mention} ist verfallen.",
-            color=0x95A5A6,
+            title="🥀 Am Altar allein gelassen …",
+            description=(
+                f"{self.proposer.mention}, du wurdest von {self.target.mention} "
+                "am Altar allein gelassen.\n\n"
+                "Der Heiratsantrag ist abgelaufen, ohne dass eine Antwort kam. 💔"
+            ),
+            color=0x6B5B73,
         )
+        if gif:
+            embed.set_image(url=f"attachment://{gif.filename}")
+        embed.set_footer(text="Manche Liebesgeschichten brauchen wohl noch etwas Zeit.")
         try:
-            await self.message.edit(content=None, embed=embed, view=self)
+            await self.message.edit(
+                content=None,
+                embed=embed,
+                view=self,
+                attachments=[gif] if gif else [],
+            )
         except discord.HTTPException:
-            pass
+            logger.warning("Abgelaufener Heiratsantrag konnte nicht aktualisiert werden.")
+        finally:
+            self.stop()
 
 
 class MarryCog(commands.Cog):
@@ -102,16 +130,11 @@ class MarryCog(commands.Cog):
         if self.session:
             await self.session.close()
 
-    async def _fetch_gif(self, category: str) -> Optional[str]:
+    async def _fetch_gif(self, category: str) -> Optional[discord.File]:
         if self.session is None:
             return None
         try:
-            async with self.session.get(
-                NEKOS_URL.format(category), timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                return data["results"][0]["url"]
+            return await fetch_gif_file(self.session, category, filename=f"{category}.gif")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Hochzeits-GIF-Abruf fehlgeschlagen: %s", exc)
             return None
@@ -147,12 +170,20 @@ class MarryCog(commands.Cog):
     @app_commands.describe(user="Von wem?")
     async def divorce(self, interaction: discord.Interaction, user: discord.Member) -> None:
         if self.db.remove_marriage(interaction.guild_id, interaction.user.id, user.id):
-            await interaction.response.send_message(
-                f"💔 {interaction.user.mention} und {user.mention} sind jetzt geschieden."
+            await interaction.response.defer()
+            gif = await self._fetch_gif(REJECT_GIF_CATEGORY)
+            embed = discord.Embed(
+                description=f"💔 {interaction.user.mention} und {user.mention} sind jetzt geschieden.",
+                color=0x95A5A6,
+            )
+            if gif:
+                embed.set_image(url=f"attachment://{gif.filename}")
+            await interaction.edit_original_response(
+                embed=embed, attachments=[gif] if gif else []
             )
         else:
             await interaction.response.send_message(
-                f"⚠️ Ihr seid gar nicht verheiratet.", ephemeral=True
+                "⚠️ Ihr seid gar nicht verheiratet.", ephemeral=True
             )
 
     @app_commands.command(name="marriages", description="Zeigt, mit wem jemand verheiratet ist.")

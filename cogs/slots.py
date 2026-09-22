@@ -16,12 +16,13 @@ from discord.ext import commands
 
 logger = logging.getLogger("oaken-tower-bot")
 
-MAX_BET: int = 10000
+MAX_BET: int = 100000
 COIN_EMOJI_NAME = "YamiToken"
 COIN_FALLBACK = "🪙"
 SPINNER = "🎰"
 REEL_DELAY = 0.8  # Sekunden zwischen den stoppenden Walzen
 LUCK_COPY = 0.40  # mit Glücksbringer: Chance, dass Walze 2/3 die erste kopiert
+BASE_COPY = 0.05  # immer aktiv: leichter Kopier-Bias → Gewinnchance ~2,8 % → ~4,3 %
 
 # Symbol-Key → Auszahlungs-Multiplikator (nur bei drei Gleichen).
 PAYOUTS: dict[str, int] = {
@@ -80,25 +81,23 @@ class SlotsCog(commands.Cog):
         guild = interaction.guild
         coin = self._coin(guild)
         balance = int(self.db.get_user(guild.id, interaction.user.id)["coins"])
-        if einsatz > balance:
+        # Einsatz atomar abbuchen (nur wenn das Guthaben reicht) – verhindert Races.
+        if not self.db.spend_coins(guild.id, interaction.user.id, einsatz):
             await interaction.response.send_message(
                 f"⚠️ Du hast nur **{_fmt(balance)}** {coin}, das reicht nicht für **{_fmt(einsatz)}**.",
                 ephemeral=True,
             )
             return
 
-        # Einsatz abbuchen und Ergebnis ziehen (ggf. mit Glücksbringer-Bias).
-        self.db.add_coins(guild.id, interaction.user.id, -einsatz)
+        # Einsatz ist abgebucht – Ergebnis ziehen (ggf. mit Glücksbringer-Bias).
         boosted = self.db.consume_charge(guild.id, interaction.user.id, "luck")
         remaining = self.db.get_charges(guild.id, interaction.user.id, "luck")
-        if boosted:
-            reels = [random.choice(SYMBOL_KEYS)]
-            for _ in range(2):
-                reels.append(
-                    reels[0] if random.random() < LUCK_COPY else random.choice(SYMBOL_KEYS)
-                )
-        else:
-            reels = [random.choice(SYMBOL_KEYS) for _ in range(3)]
+        copy_chance = LUCK_COPY if boosted else BASE_COPY
+        reels = [random.choice(SYMBOL_KEYS)]
+        for _ in range(2):
+            reels.append(
+                reels[0] if random.random() < copy_chance else random.choice(SYMBOL_KEYS)
+            )
         win = reels[0] == reels[1] == reels[2]
         mult = PAYOUTS[reels[0]] if win else 0
         payout = einsatz * mult

@@ -214,12 +214,14 @@ class BlackjackView(discord.ui.View):
     @discord.ui.button(label="Double", style=discord.ButtonStyle.success, emoji="💰")
     async def double(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         hand = self.hands[self.current]
-        if len(hand.cards) != 2 or self._balance() < hand.bet:
+        # Zusatzeinsatz atomar abbuchen (nur wenn 2 Karten und Guthaben reicht).
+        if len(hand.cards) != 2 or not self.db.spend_coins(
+            self.guild.id, self.player.id, hand.bet
+        ):
             await interaction.response.send_message(
                 "⚠️ Double Down ist hier nicht möglich.", ephemeral=True
             )
             return
-        self.db.add_coins(self.guild.id, self.player.id, -hand.bet)
         hand.bet *= 2
         hand.doubled = True
         hand.cards.append(self.deck.pop())
@@ -229,17 +231,18 @@ class BlackjackView(discord.ui.View):
     @discord.ui.button(label="Split", style=discord.ButtonStyle.success, emoji="✂️")
     async def split(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         hand = self.hands[self.current]
+        # Strukturprüfungen zuerst; der Zusatzeinsatz wird zuletzt atomar
+        # abgebucht (nur wenn alle Bedingungen erfüllt sind und das Guthaben reicht).
         if (
             len(hand.cards) != 2
             or card_value(hand.cards[0][0]) != card_value(hand.cards[1][0])
             or len(self.hands) >= MAX_HANDS
-            or self._balance() < hand.bet
+            or not self.db.spend_coins(self.guild.id, self.player.id, hand.bet)
         ):
             await interaction.response.send_message(
                 "⚠️ Splitten ist hier nicht möglich.", ephemeral=True
             )
             return
-        self.db.add_coins(self.guild.id, self.player.id, -hand.bet)
         card_a, card_b = hand.cards
         new_hand = Hand([card_b, self.deck.pop()], hand.bet)
         hand.cards = [card_a, self.deck.pop()]
@@ -253,7 +256,7 @@ class BlackjackView(discord.ui.View):
     # --- Darstellung ----------------------------------------------------------
 
     def _render(self) -> discord.Embed:
-        embed = discord.Embed(title="🃏 Blackjack", color=0x5865F2)
+        embed = discord.Embed(title="🃏 Blackjack", color=0x7C3AED)
         embed.set_author(name=self.player.display_name, icon_url=self.player.display_avatar.url)
         shown = card_value(self.dealer[0][0])
         embed.add_field(
@@ -344,6 +347,15 @@ class DuelChallengeView(discord.ui.View):
         except discord.HTTPException:
             pass
 
+    async def _cancel_duel(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        """Duell absagen, weil `member` den Einsatz nicht aufbringen kann."""
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(
+            content=f"⚠️ {member.mention} hat nicht mehr genug Coins für den Einsatz — Duell abgesagt.",
+            embed=None, view=self,
+        )
+
     @discord.ui.button(label="Annehmen", emoji="✅", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         if interaction.user.id != self.opponent.id:
@@ -351,20 +363,17 @@ class DuelChallengeView(discord.ui.View):
                 "Nur die herausgeforderte Person kann annehmen.", ephemeral=True
             )
             return
-        # Beide müssen den Einsatz noch aufbringen können.
-        for member in (self.challenger, self.opponent):
-            if self._balance(member) < self.bet:
-                self.resolved = True
-                for child in self.children:
-                    child.disabled = True  # type: ignore[attr-defined]
-                await interaction.response.edit_message(
-                    content=f"⚠️ {member.mention} hat nicht mehr genug Coins für den Einsatz — Duell abgesagt.",
-                    embed=None, view=self,
-                )
-                return
+        # Beide Einsätze atomar abbuchen, damit zwischen Prüfung und Buchung kein
+        # Race (Doppelklick) zu negativen Salden führt. Schlägt die zweite Buchung
+        # fehl, wird die erste zurückerstattet.
         self.resolved = True
-        self.db.add_coins(self.challenger.guild.id, self.challenger.id, -self.bet)
-        self.db.add_coins(self.opponent.guild.id, self.opponent.id, -self.bet)
+        if not self.db.spend_coins(self.challenger.guild.id, self.challenger.id, self.bet):
+            await self._cancel_duel(interaction, self.challenger)
+            return
+        if not self.db.spend_coins(self.opponent.guild.id, self.opponent.id, self.bet):
+            self.db.add_coins(self.challenger.guild.id, self.challenger.id, self.bet)
+            await self._cancel_duel(interaction, self.opponent)
+            return
         game = DuelGameView(self.cog, self.challenger, self.opponent, self.bet)
         game.message = self.message
         await interaction.response.edit_message(content=None, embed=game._render(), view=game)
@@ -515,7 +524,7 @@ class DuelGameView(discord.ui.View):
                 color, head = 0x2ECC71, f"🏆 {self.winner.mention} gewinnt **{_fmt(self.bet * 2)}** {self.coin}!"
             title = "🃏 Blackjack-Duell — Ergebnis"
         else:
-            color, head = 0x5865F2, f"▶️ {self._current_player().mention} ist am Zug"
+            color, head = 0x7C3AED, f"▶️ {self._current_player().mention} ist am Zug"
             title = "🃏 Blackjack-Duell"
 
         embed = discord.Embed(title=title, description=head, color=color)
@@ -535,11 +544,11 @@ class DuelGameView(discord.ui.View):
                 inline=False,
             )
         if final:
+            # Footer rendert kein Markdown/Custom-Emoji → Kontostände als Field.
             parts = [f"{p.display_name}: **{_fmt(self.balances.get(p.id, 0))}** {self.coin}" for p in self.players]
-            footer = "Kontostände — " + " · ".join(parts)
+            embed.add_field(name="Kontostände", value=" · ".join(parts), inline=False)
             if timed_out:
-                footer = "⏱️ Zeit abgelaufen. " + footer
-            embed.set_footer(text=footer)
+                embed.set_footer(text="⏱️ Zeit abgelaufen.")
         else:
             embed.set_footer(text="Hit · Stand")
         return embed
@@ -568,14 +577,14 @@ class BlackjackCog(commands.Cog):
         guild = interaction.guild
         coin = self._coin(guild)
         balance = int(self.db.get_user(guild.id, interaction.user.id)["coins"])
-        if einsatz > balance:
+        # Einsatz atomar abbuchen (nur wenn das Guthaben reicht) – verhindert Races.
+        if not self.db.spend_coins(guild.id, interaction.user.id, einsatz):
             await interaction.response.send_message(
                 f"⚠️ Du hast nur **{_fmt(balance)}** {coin}, das reicht nicht für **{_fmt(einsatz)}**.",
                 ephemeral=True,
             )
             return
 
-        self.db.add_coins(guild.id, interaction.user.id, -einsatz)
         view = BlackjackView(self, interaction, einsatz)
 
         # Sofortiger natürlicher Blackjack → direkt abrechnen, keine Buttons.
@@ -589,10 +598,10 @@ class BlackjackCog(commands.Cog):
         await interaction.response.send_message(embed=view._render(), view=view)
         view.message = await interaction.original_response()
 
-    @app_commands.command(name="blackjackvs", description="Fordere ein anderes Mitglied zum Blackjack-Duell heraus.")
+    @app_commands.command(name="blackjackduel", description="1v1-Blackjack: Beide setzen denselben Betrag, wer die höhere Hand hat, gewinnt.")
     @app_commands.guild_only()
     @app_commands.describe(gegner="Wen forderst du heraus?", einsatz=f"Einsatz in Coins (1–{MAX_BET})")
-    async def blackjackvs(
+    async def blackjackduel(
         self,
         interaction: discord.Interaction,
         gegner: discord.Member,
@@ -628,7 +637,7 @@ class BlackjackCog(commands.Cog):
                 f"Einsatz: **{_fmt(einsatz)}** {coin} pro Person · Gewinner kassiert **{_fmt(einsatz * 2)}** {coin}.\n\n"
                 f"{gegner.mention}, nimmst du an?"
             ),
-            color=0x5865F2,
+            color=0x7C3AED,
         )
         await interaction.response.send_message(
             content=gegner.mention, embed=embed, view=view,

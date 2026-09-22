@@ -1,5 +1,5 @@
-discord.py>=2.4
-
-# Optional: lädt automatisch eine .env-Datei. Ohne dieses Paket funktioniert
-# der Bot trotzdem, solange DISCORD_TOKEN als Umgebungsvariable gesetzt ist.
-python-dotenv>=1.0
+discord.py>=2.4,<3
+aiohttp>=3.9,<4
+python-dotenv>=1.0,<2
+Pillow>=10,<12
+cryptography>=44,<47

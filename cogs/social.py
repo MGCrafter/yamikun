@@ -1,4 +1,4 @@
-"""Freundes-System: Anfragen/Bestätigen, Liste, Friendship-Level.
+"""Globales Freundes-System: Anfragen/Bestätigen, Liste, Friendship-Level.
 
 Friendship-XP wächst v.a. durch Interactions (siehe cogs/interactions.py).
 Level = XP // FXP_PER_LEVEL.
@@ -26,6 +26,61 @@ def level_progress(xp: int) -> tuple[int, int]:
     return xp % FXP_PER_LEVEL, FXP_PER_LEVEL
 
 
+def friend_request_embed(requester: discord.abc.User, target: discord.abc.User) -> discord.Embed:
+    embed = discord.Embed(
+        title="Eine neue Verbindung wartet",
+        description=(
+            f"{requester.mention} möchte dich in Yamikuns Freundeskreis aufnehmen.\n\n"
+            "Gemeinsam sammelt ihr Freundschafts-XP und könnt eure öffentlichen Achievements vergleichen."
+        ),
+        color=0x8B5CF6,
+    )
+    embed.set_author(name=requester.display_name, icon_url=requester.display_avatar.url)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.set_footer(text="Die Anfrage kann nur von der eingeladenen Person angenommen werden.")
+    return embed
+
+
+class FriendRequestView(discord.ui.View):
+    def __init__(self, db, guild_id: int, requester_id: int, target_id: int) -> None:
+        super().__init__(timeout=86_400)
+        self.db = db
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.target_id = target_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.target_id:
+            return True
+        await interaction.response.send_message(
+            "Diese Einladung ist nicht für dich bestimmt.", ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(label="Freundschaft annehmen", emoji="🤝", style=discord.ButtonStyle.success)
+    async def accept_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if not self.db.accept_friend(self.guild_id, self.target_id, self.requester_id):
+            await interaction.response.send_message(
+                "Diese Freundschaftsanfrage ist nicht mehr offen.", ephemeral=True
+            )
+            return
+        button.disabled = True
+        button.label = "Freundschaft angenommen"
+        embed = discord.Embed(
+            title="Freundschaft geschlossen",
+            description=(
+                f"{interaction.user.mention} und <@{self.requester_id}> sind jetzt Teil desselben Freundeskreises.\n"
+                "Zeit, gemeinsam Freundschafts-XP zu sammeln."
+            ),
+            color=0x22C55E,
+        )
+        embed.set_footer(text="Yamikun bewahrt diese Verbindung serverübergreifend auf.")
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+
 class SocialCog(commands.Cog):
     """/friend (add, accept, remove, requests, list, level)."""
 
@@ -34,12 +89,14 @@ class SocialCog(commands.Cog):
         self.db = bot.db  # type: ignore[attr-defined]
 
     friend = app_commands.Group(
-        name="friend", description="Freundesliste und Freundschaftslevel.", guild_only=True
+        name="friend", description="Serverübergreifende Freundesliste und Freundschaftslevel.", guild_only=True
     )
 
     @friend.command(name="add", description="Schicke jemandem eine Freundschaftsanfrage.")
     @app_commands.describe(user="Wen möchtest du als Freund:in hinzufügen?")
     async def add(self, interaction: discord.Interaction, user: discord.Member) -> None:
+        if interaction.guild_id is None:
+            return
         if user.bot or user.id == interaction.user.id:
             await interaction.response.send_message(
                 "⚠️ Das geht nicht (nicht mit Bots oder dir selbst).", ephemeral=True
@@ -48,7 +105,7 @@ class SocialCog(commands.Cog):
         code = self.db.send_friend_request(interaction.guild_id, interaction.user.id, user.id)
         if code == "already_friends":
             await interaction.response.send_message(
-                f"Ihr seid bereits befreundet mit {user.mention}.", ephemeral=True
+                f"Du bist bereits mit {user.mention} befreundet.", ephemeral=True
             )
         elif code == "already_pending":
             await interaction.response.send_message(
@@ -59,9 +116,14 @@ class SocialCog(commands.Cog):
                 f"🤝 {interaction.user.mention} und {user.mention} sind jetzt **befreundet**!"
             )
         else:  # requested
+            view = FriendRequestView(
+                self.db, interaction.guild_id, interaction.user.id, user.id
+            )
             await interaction.response.send_message(
-                f"🤝 {interaction.user.mention} hat {user.mention} eine Freundschaftsanfrage geschickt.\n"
-                f"{user.mention}: nimm mit `/friend accept @{interaction.user.display_name}` an."
+                content=user.mention,
+                embed=friend_request_embed(interaction.user, user),
+                view=view,
+                allowed_mentions=discord.AllowedMentions(users=True),
             )
 
     @friend.command(name="accept", description="Nimm eine Freundschaftsanfrage an.")
@@ -98,18 +160,18 @@ class SocialCog(commands.Cog):
             return
         lines = [f"• <@{uid}> — `/friend accept`" for uid in ids]
         embed = discord.Embed(
-            title="📬 Offene Freundschaftsanfragen", description="\n".join(lines), color=0x5865F2
+            title="📬 Offene Freundschaftsanfragen", description="\n".join(lines), color=0x7C3AED
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @friend.command(name="list", description="Zeigt deine Freunde und Friendship-Level.")
+    @friend.command(name="list", description="Zeigt deine globalen Freunde und Friendship-Level.")
     @app_commands.describe(user="Optional: wessen Freundesliste? (Standard: du)")
     async def list_(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
         target = user or interaction.user
         friends = self.db.list_friends(interaction.guild_id, target.id)
         if not friends:
             await interaction.response.send_message(
-                f"{target.display_name} hat noch keine Freunde in der Liste.", ephemeral=True
+                f"{target.display_name} hat noch keine Freunde in der globalen Liste.", ephemeral=True
             )
             return
         lines = []
@@ -118,9 +180,9 @@ class SocialCog(commands.Cog):
             name = member.display_name if member else f"User {other_id}"
             lines.append(f"**{i}.** {name} — Friendship-Level **{friend_level(xp)}** ({xp} FXP)")
         embed = discord.Embed(
-            title=f"👥 Freunde von {target.display_name}",
+            title=f"👥 Globale Freunde von {target.display_name}",
             description="\n".join(lines),
-            color=0x5865F2,
+            color=0x7C3AED,
         )
         await interaction.response.send_message(embed=embed)
 

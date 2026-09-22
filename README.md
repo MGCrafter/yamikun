@@ -1,339 +1,163 @@
-# Oaken Tower Hash-Code Discord Bot
+<p align="center">
+  <img src="docs/assets/yamikun-banner.png" alt="Yamikun – Dein Turm. Deine Regeln. Anime-Maskottchen mit violetten Flammen" width="100%" />
+</p>
 
-Ein Discord-Bot für die Oaken-Tower-Community mit mehreren Modulen:
+<p align="center">
+  <strong>Deine Community. Deine Karten. Dein Yami.</strong><br />
+  Discord-Bot, Twitch-Chatbot und Webpanel für eine gemeinsame Community.
+</p>
 
-1. **Auto-Delete** (`/oaken`) — löscht in aktivierten Channels automatisch den
-   alten Oaken-Tower-Code eines Users, sobald derselbe User einen neuen postet.
-2. **Leveling** (`/rank`, `/leaderboard`, `/level`) — XP durch Nachrichten &
-   Voice, Level-Aufstiege mit Coin-Belohnung.
-3. **Economy** (`/daily`, `/pay`) — tägliche Belohnung mit Streak, Coins überweisen.
-4. **Gambling** (`/coinflip`, `/blackjack`, `/slots`) — Glücksspiele mit der
-   Coin-Währung.
-5. **Shop** (`/shop`, `/buy`) — Coins gegen temporäre Boosts (Glücksbringer, XP-Boost).
-6. **Profil** (`/profile`, `/setbio`) — Statistik-Seite inkl. Spiel-Statistiken.
-7. **Social** (`/friend`) — Freundesliste mit Anfragen und Friendship-Level.
-8. **Interactions** (`/hug`, `/pat`, `/kiss`, `/slap`, `/highfive`) — GIF-Aktionen.
-9. **LFG** (`/lfg`) — Gruppensuche mit Join-Buttons und opt-in Ping-Rolle.
-10. **Announcer** (`/announce`) — neue Beiträge überwachter Quellen (YouTube/RSS)
-    in einen Announce-Channel posten.
-11. **Moderation** (`/purge`) — Nachrichten massenweise löschen.
-12. **Booster / Yami-Karten** (`/booster`) — Sammelkarten über Booster-Packs (mit Coins gekauft).
+<p align="center">
+  <a href="https://github.com/MGCrafter/yamikun/actions/workflows/checks.yml"><img src="https://github.com/MGCrafter/yamikun/actions/workflows/checks.yml/badge.svg" alt="Tests und Build" /></a>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12 im Docker-Image" />
+  <img src="https://img.shields.io/badge/discord.py-2.x-5865F2?logo=discord&logoColor=white" alt="discord.py 2.x" />
+  <img src="https://img.shields.io/badge/React-18-149ECA?logo=react&logoColor=white" alt="React 18" />
+  <img src="https://img.shields.io/badge/Deploy-CapRover-ED4963?logo=docker&logoColor=white" alt="Deployment mit CapRover" />
+</p>
 
-Der Code ist in Cogs aufgeteilt: `bot.py` (Loader) lädt die Module unter `cogs/`;
-`db.py` kapselt die SQLite-Datenbank (`bot.db`). Die Münz-Währung wird mit dem
-Server-Emoji `:YamiToken:` dargestellt (Fallback 🪙).
+<p align="center">
+  <a href="#was-yami-kann">Features</a> ·
+  <a href="#ein-blick-ins-webpanel">Webpanel</a> ·
+  <a href="#lokal-starten">Installation</a> ·
+  <a href="docs/deployment.md">CapRover</a> ·
+  <a href="docs/twitch-chat.md">Twitch</a>
+</p>
 
-## Voraussetzungen
+---
 
-- Python 3.11+
-- Ein Discord-Account mit Rechten, einen Bot zu erstellen
+Yamikun verbindet Sammelkarten und gemeinsame Spielmomente mit den Werkzeugen,
+die ein Discord-Server im Alltag braucht: Moderation, Tickets, Rollen und eigene
+Voice-Channels. Admins verwalten ihren Server im Webpanel; Mitglieder finden dort
+ihre Sammlung, ihr Profil und ihre Erfolge. Optional begleitet Yami die Community
+auch im Twitch-Chat.
 
-## 1. Bot im Discord Developer Portal anlegen
+## Was Yami kann
 
-1. Öffne das [Discord Developer Portal](https://discord.com/developers/applications).
-2. **New Application** → Namen vergeben → **Create**.
-3. Links auf **Bot** → **Add Bot** (falls nötig) bestätigen.
-4. Unter **Bot** den Token via **Reset Token** anzeigen lassen und kopieren.
-   Diesen Token brauchst du gleich für `DISCORD_TOKEN`. **Niemals öffentlich teilen.**
+| Bereich | Features |
+| --- | --- |
+| **Karten & Booster** | Spielbelohnungen, Sammel- und Yami-Karten, Booster, Tauschen und Fusion. Uploads werden automatisch für Discord als WebP optimiert. |
+| **Economy & Leveling** | Globale Coins, XP, Level, Daily-Streaks, Shop, Titel und Leaderboards. |
+| **Community** | Profile, Freundschaftsanfragen, Friendship-XP, Ehen, GIF-Interactions und LFG mit Join-Buttons. |
+| **Achievements** | 32 Erfolge, sichtbare Quest-Ziele, geheime Erfolge und Vergleich mit Freunden. |
+| **Games** | Coinflip, Blackjack, Slots und Roulette mit virtuellen Coins. |
+| **Moderation & Support** | AutoMod, persistente Verwarnungen, Audit-Log und Tickets mit privaten Threads und Web-Transcripts. |
+| **Server-Alltag** | Reaction Roles, Auto-Rollen, Welcome- und Boost-Nachrichten, Level-Up-Meldungen sowie YouTube-/RSS-Ankündigungen. |
+| **Yami Voice** | Join-to-Create-Channels mit Besitzerwechsel, Sperren, Freigaben, User-Limit und automatischem Aufräumen. |
+| **Twitch** | Discord-Live-Benachrichtigungen sowie optionaler Chatbot mit Social-Commands, Coins, Spielen, AutoMod und automatischen Nachrichten. |
+| **Oaken Tower** | Alte Spielcodes pro Person automatisch ersetzen und 1v1-Runden mitzählen. |
 
-### Message Content Intent aktivieren
+**Ein Profil über mehrere Discord-Server:** Coins, XP, Karten, Booster,
+Freundschaften und Achievement-Freischaltungen begleiten den User. Channels,
+Rollen und Feature-Konfiguration bleiben serverbezogen. Details stehen in der
+[Einrichtungsanleitung](docs/setup.md#server-übergreifendes-verhalten).
 
-Der Bot muss den Inhalt von Nachrichten lesen können, um Codes zu erkennen und
-Nachrichten-XP zu vergeben:
+## Ein Blick ins Webpanel
 
-1. Im Developer Portal unter **Bot** → Abschnitt **Privileged Gateway Intents**.
-2. **Message Content Intent** einschalten und speichern.
+![Yamikun-Webpanel: Übersicht, Kartenstatistiken und Server-Navigation mit Beispieldaten](docs/assets/webpanel-overview.png)
 
-### Optional: Sammelkarten-Rewards (Presence Intent)
+*Screenshot der tatsächlichen Oberfläche mit fiktiven Beispieldaten.*
 
-Nur nötig für die **Sammelkarten fürs Spielen** (`/cards`). Dafür muss der Bot
-sehen, welches Spiel jemand spielt:
+- **Für Admins:** Karten, Spiele, Rollen, Economy, Moderation und Server-Einstellungen.
+- **Für Mitglieder:** eigenes Dashboard unter `/me` mit Sammlung, Fusion, Profil und Erfolgen.
+- **Für Streamer:** Twitch-Anmeldung und Chatbot-Verwaltung unter `/twitch`.
+- **Discord-Login:** Serverzugriff über „Server verwalten“; globale Verwaltungsaktionen sind an die konfigurierten Web-Owner gebunden.
 
-1. Im Developer Portal **Presence Intent** **und** **Server Members Intent** aktivieren.
-2. In der `.env` `PRESENCE_INTENT=1` setzen und den Bot neu starten.
+## Lokal starten
 
-Ohne diese Variable bleibt das Karten-Tracking inaktiv (der Rest des Bots läuft
-normal). Ist `PRESENCE_INTENT=1` gesetzt, aber die Intents im Portal **nicht**
-aktiviert, startet der Bot nicht — dann die Portal-Einstellung nachholen.
-
-## 2. Bot einladen
-
-Erzeuge eine Einladungs-URL mit den nötigen Rechten:
-
-1. Im Developer Portal unter **OAuth2** → **URL Generator**.
-2. **Scopes:** `bot` und `applications.commands`.
-3. **Bot Permissions:** `Send Messages`, `Manage Messages`, `Use Application Commands`.
-   Optional **`Manage Roles`** — nur nötig, damit sich Mitglieder per `/lfg role`
-   selbst die LFG-Ping-Rolle geben können (die Bot-Rolle muss dann über der
-   LFG-Rolle stehen).
-4. Generierte URL öffnen und den Bot auf deinen Server einladen.
-
-## 3. Installation
+Voraussetzungen: **Python 3.12**, **Node.js 22**, npm und eine Discord-Anwendung.
 
 ```bash
+git clone https://github.com/MGCrafter/yamikun.git
+cd yamikun
+
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-## 4. Token konfigurieren
-
-Variante A — Umgebungsvariable (fish-Shell):
-
-```fish
-set -x DISCORD_TOKEN "dein-token-hier"
-```
-
-Variante B — `.env`-Datei (empfohlen, nutzt `python-dotenv`):
-
-```bash
 cp .env.example .env
+npm ci --prefix frontend
+npm run build --prefix frontend
 ```
 
-Dann `.env` öffnen und den Token bei `DISCORD_TOKEN=` eintragen.
-
-### Optional: Commands sofort sichtbar machen
-
-Ohne weitere Konfiguration werden die Slash-Commands **global** registriert —
-das kann bei Discord bis zu **~1 Stunde** dauern, bis sie überall erscheinen.
-
-Setzt du zusätzlich `GUILD_ID` (deine Server-ID), werden die Commands sofort auf
-diesem Server registriert — ideal zum Testen:
-
-```fish
-set -x GUILD_ID "deine-server-id"
-```
-
-oder in der `.env` die Zeile `GUILD_ID=` einkommentieren und füllen.
-(Server-ID: Discord → Servereinstellungen → Erweitert → Entwicklermodus an,
-dann Rechtsklick auf den Server → **ID kopieren**.)
-
-## 5. Bot starten
+In `.env` mindestens `DISCORD_TOKEN` setzen. Im Discord Developer Portal
+**Message Content Intent** und **Server Members Intent** aktivieren und den Bot
+mit den Scopes `bot` und `applications.commands` einladen. Für Spielbelohnungen
+zusätzlich **Presence Intent** aktivieren und `PRESENCE_INTENT=1` setzen.
 
 ```bash
 python bot.py
 ```
 
-## 6. Im Channel aktivieren
+Das Webpanel lässt sich mit `WEB_ENABLED=1`, `WEB_BASE_URL`, `OAUTH_CLIENT_ID`
+und `OAUTH_CLIENT_SECRET` aktivieren. Als Discord-OAuth-Redirect exakt
+`<WEB_BASE_URL>/callback` hinterlegen. Alle Optionen stehen in
+[`.env.example`](.env.example) und unter [Einrichtung & Konfiguration](docs/setup.md).
 
-Führe im gewünschten Channel den Slash-Command aus:
+Die interaktive Befehlsübersicht findest du direkt in Discord über **`/help`**.
 
+## Mit GitHub auf CapRover deployen
+
+Das Repository enthält bereits `Dockerfile` und `captain-definition`.
+Der Docker-Build erstellt das React-Frontend und bündelt es mit dem Python-Bot
+in einem Container.
+
+| CapRover-Einstellung | Wert |
+| --- | --- |
+| Repository | `https://github.com/MGCrafter/yamikun.git` |
+| Branch | `main` |
+| Captain Definition | `captain-definition` im Repository-Root |
+| Container HTTP Port | `8080` |
+| Persistent Directory | `/data` |
+| Instanzen | `1` für den gemeinsamen Bot- und SQLite-Prozess |
+
+**Einmal einrichten, danach per Push aktualisieren:** CapRover mit dem Repository
+verbinden und den dort erzeugten Webhook in GitHub hinterlegen. Ab dann kann ein
+Push auf `main` einen neuen Build auslösen. Die vollständige Anleitung inklusive
+OAuth, Datenerhalt und manueller Tarball-Alternative steht in
+[Deployment & Updates](docs/deployment.md).
+
+> Das Repository allein aktiviert noch kein automatisches Deployment. Dafür ist
+> die einmalige Verbindung zwischen CapRover und GitHub nötig. Der enthaltene
+> GitHub-Workflow prüft Tests und Build; er deployt nicht.
+
+## Projektstruktur
+
+```text
+.
+├── bot.py                 Discord-Start und Cog-Loader
+├── db.py                  SQLite, Schema und Migrationen
+├── cogs/                  Discord-Features und Webserver-Einstieg
+├── webpanel/              API-Routen, Middleware und Bildverarbeitung
+├── twitch_chat/           Twitch-Chatbot, Commands und Datenspeicherung
+├── frontend/              React, TypeScript, Vite und Tailwind
+├── webassets/             Öffentliches Logo und Favicon
+├── docs/                  Einrichtung, Deployment, Bilder und Archiv
+├── scripts/               Checks, Backups und optionale Deploy-Pakete
+├── tests/                 Automatisierte Python-Tests
+├── .github/workflows/     GitHub-Prüfungen für Pushes und Pull Requests
+├── .env.example           Konfigurationsvorlage ohne Zugangsdaten
+├── Dockerfile             Frontend-Build und Python-Laufzeit
+└── captain-definition     CapRover-Builddefinition
 ```
-/oaken on
-```
 
-Ab jetzt löscht der Bot dort den jeweils vorherigen Code jedes Users, sobald
-dieser einen neuen postet.
+Lokale `.env`-Dateien, Datenbanken, Uploads, Backups, virtuelle Umgebungen und
+Build-Ausgaben bleiben durch `.gitignore` außerhalb des Repositorys.
+`.dockerignore` hält diese Dateien auch aus dem Docker-Build heraus.
 
-## Befehle
-
-> **`/help`** zeigt alle Befehle interaktiv in Discord (Kategorie per Dropdown wählen).
->
-> „Mods" = Berechtigung **Kanäle verwalten** (bzw. **Nachrichten/Rollen verwalten**
-> beim jeweiligen Befehl) oder Administrator. Die Einstellwerte stehen jeweils als
-> Konstanten oben in der zugehörigen Datei unter `cogs/` und sind leicht anpassbar.
-
-### Auto-Delete (`/oaken`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/oaken on` / `off` / `status` | Auto-Delete im Channel an/aus/Status (Status zeigt auch die aktuelle Runde) | alle |
-| `/oaken newgame` / `endgame` | 1v1-Spiel mit Rundenzählung starten / beenden | alle |
-| `/oaken reset` | Vergisst gespeicherte Code-IDs (löscht nichts) | Mods |
-
-Ein Code ist ein zusammenhängender Block aus **≥ 200** Base64-Zeichen
-(`A–Z a–z 0–9 + / =`). Der alte Code eines Users wird gelöscht, sobald derselbe
-User einen neuen postet; Codes anderer bleiben unangetastet.
-
-**1v1-Rundenzählung:** Nach `/oaken newgame` antwortet der Bot auf jeden Code mit
-„🎮 Runde X — Code von @user". Eine Runde steigt erst, wenn **beide** Spieler einen
-neuen Code gepostet haben — so ist immer klar, wer in welcher Runde dran ist.
-
-### Leveling (`/rank`, `/leaderboard`, `/level`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/rank [user]` | Level, XP-Fortschritt und Coins | alle |
-| `/leaderboard` | Top 10 nach XP | alle |
-| `/title list / set / clear` | XP-Titel anzeigen/wählen (durch Level freischaltbar, im Profil sichtbar) | alle |
-| `/level setchannel #channel` | Channel für Level-Up-Meldungen | Mods |
-| `/level give @user <coins>` | Coins vergeben/entziehen | Mods |
-
-Als Leveling-Belohnung dienen **Titel** (statt Rollen): Sie werden durch Level
-freigeschaltet, mit `/title set` gewählt und personalisieren das `/profile`.
-Die Titel-Stufen stehen in `cogs/titles.py`.
-
-- **Nachrichten:** 15–25 XP, max. 1× pro 60 s. **Voice:** 5 XP/Min (nicht AFK,
-  ≥ 2 Personen, nicht taub). **Level-Kurve:** `5·level² + 50·level + 100`.
-- **Coins beim Level-Up:** `100 × neues Level`. Level-Up-Meldungen nur, wenn
-  `/level setchannel` gesetzt ist.
-
-### Economy (`/daily`, `/pay`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/daily` | Tägliche Coin-Belohnung mit Streak | alle |
-| `/pay @user <betrag>` | Coins an jemanden überweisen (1:1, keine Gebühr) | alle |
-
-- **Daily:** alle 24 h; Streak +1 pro Tag, mehr als 48 h Pause setzt sie zurück.
-  Belohnung = `10 × Streak` (max 500) **+100** alle 7 Streak-Tage.
-
-### Gambling (`/coinflip`, `/blackjack`, `/slots`)
-
-| Command | Beschreibung |
-|---|---|
-| `/coinflip <head/tail> <einsatz>` | Münzwurf, 48 % Gewinnchance, Gewinn 1:1 |
-| `/blackjack <einsatz>` | Blackjack gegen den Dealer (Hit/Stand/Double/Split, Blackjack zahlt 3:2) |
-| `/slots <einsatz>` | 3-Walzen-Slot, nur 3 Gleiche zahlen (Jackpot `:YamiToken:` ×100), RTP ~90 % |
-
-Einsatz jeweils **1–10.000**, nie mehr als der Kontostand. Spiel-Statistiken
-fließen ins `/profile`.
-
-### Shop (`/shop`, `/buy`)
-
-| Command | Beschreibung |
-|---|---|
-| `/shop` | Zeigt kaufbare Items |
-| `/buy <item>` | Kauft ein Item |
-
-- **🍀 Glücksbringer** (20.000): erhöhte Gewinnchance für die nächsten 5
-  Coinflip-/Slots-Spiele (Coinflip 65 %, Slots stärker gewichtet).
-- **⚡ XP-Boost** (10.000): doppelte XP (Nachrichten & Voice) für 60 Minuten.
-
-### Profil (`/profile`, `/setbio`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/profile [user]` | Avatar, Level + XP-Balken, Coins, Rang, Spiel-Statistiken, Titel, Ehen, Bio | alle |
-| `/setbio <text>` | Eigene Bio setzen (max. 200 Zeichen, leer = löschen) | alle |
-| `/setcolor <hex>` | Profil-Akzentfarbe wählen (`#FF8800`; `reset` = Rollenfarbe) | alle |
-
-### Social (`/friend`)
-
-| Command | Beschreibung |
-|---|---|
-| `/friend add @user` | Freundschaftsanfrage schicken |
-| `/friend accept @user` | Anfrage annehmen |
-| `/friend remove @user` | Freundschaft/Anfrage entfernen |
-| `/friend requests` | Offene eingehende Anfragen |
-| `/friend list [user]` | Freundesliste mit Friendship-Level |
-| `/friend level @user` | Euer gemeinsames Friendship-Level |
-| `/marry @user` | Heiratsantrag (mit Bestätigung & Hochzeits-GIF); mehrere Ehen erlaubt |
-| `/divorce @user` | Scheidung |
-| `/marriages [user]` | Zeigt die Ehen einer Person |
-
-Friendship-Level = Freundschafts-XP ÷ 100; **+10 XP** pro Interaction. Ehen werden
-auch im `/profile` angezeigt.
-
-### Interactions
-
-`/hug`, `/pat`, `/kiss`, `/slap`, `/highfive` `@user` — postet ein zufälliges
-GIF (via **nekos.best**, ohne API-Key), zählt die Interaktionen und gibt
-Freundschafts-XP.
-
-### LFG — Looking for Group (`/lfg`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/lfg start <size> <beschreibung> <channel> [rolle]` | Gruppensuche mit Join/Leave-Buttons. Pingt die gewählte `rolle` (sonst die LFG-Rolle), zeigt den Voice-Channel, läuft nach 1 h ab; löst der Host auf, wird der Post gelöscht | alle |
-| `/lfg role` | Selbst für LFG-Pings an-/abmelden | alle |
-| `/lfg setrole @rolle` | Legt die LFG-Ping-Rolle fest | Rollen verwalten / Admin |
-
-`/lfg role` braucht beim Bot die Berechtigung **Rollen verwalten** (Bot-Rolle über
-der LFG-Rolle). Das **Pingen** funktioniert auch ohne.
-
-### Announcer (`/announce`, nur Mods)
-
-| Command | Beschreibung |
-|---|---|
-| `/announce channel #channel` | Setzt den Announce-Channel |
-| `/announce add <quelle> [label]` | Überwacht eine Quelle (YouTube-URL/@Handle/Kanal-ID **oder** RSS-Feed-URL) |
-| `/announce list` / `remove <id>` | Quellen anzeigen / entfernen |
-| `/announce post <link> [text]` | Link manuell in den Announce-Channel posten |
-
-- **YouTube** läuft automatisch über den offiziellen RSS-Feed (kein API-Key).
-- **TikTok/Instagram** haben keine kostenlose API → RSS-Bridge-URL (RSSHub/RSS.app)
-  per `/announce add` hinterlegen oder per `/announce post` manuell teilen.
-- Prüfung alle **5 Minuten**; beim Hinzufügen werden alte Beiträge **nicht**
-  nachgepostet.
-
-### Moderation (`/purge`, `/say`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/purge <anzahl> [user]` | Löscht 1–100 Nachrichten (optional nur von einem User) | Nachrichten verwalten / Admin |
-| `/say <text> [channel]` | Lässt den Bot eine Nachricht schreiben (kein @everyone; wird geloggt) | Nachrichten verwalten / Admin |
-
-Discord erlaubt Massen-Löschen nur für Nachrichten **jünger als 14 Tage**.
-
-### Fun & Sonstiges
-
-| Command | Beschreibung |
-|---|---|
-| `/8ball <frage>` | Antwort der magischen Miesmuschel |
-| `/insult [@user]` | Zufällige, harmlose deutsche Beleidigung |
-| `/whoisguilty <verdächtige>` | Bot ermittelt zufällig den „Schuldigen" aus den gepingten Personen |
-| `/existential [stil]` | Cursed Weisheiten / Fake-deep Quotes / philosophischer Unsinn |
-| `/summondemon` | Beschwört Yami — zufällig gnädig (`:YamiLuv:`) oder erzürnt (Cooldown) |
-
-### Spiel-Sammelkarten (`/gamecards`, `/gamecard`)
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/gamecards [user]` | Zeigt die erspielten Sammelkarten | alle |
-| `/gamecard <karte>` | Zeigt eine einzelne Karte (Bild + Seltenheit) | alle |
-| `/gamereward addgame <spiel>` | Spiel hinzufügen, das Karten gibt | Server verwalten / Admin |
-| `/gamereward removegame <spiel>` / `listgames` | Spiel entfernen / alle anzeigen | Server verwalten / Admin |
-| `/gamereward addcard <spiel> <name> <seltenheit> <bild-url>` | Karte für ein Spiel anlegen (Bild-URL ist Pflicht) | Server verwalten / Admin |
-| `/gamereward removecard <karte>` / `listcards <spiel>` | Karte entfernen / Karten eines Spiels anzeigen | Server verwalten / Admin |
-| `/gamereward setchannel [#channel]` | Channel für Karten-Drop-Meldungen (ohne Angabe: DMs) | Server verwalten / Admin |
-
-**Karten sind pro Spiel:** Wer ein Spiel spielt, erhält nur dessen Karten. Jede
-Karte wird manuell angelegt und braucht eine **Bild-URL**. Hat ein Spiel keine
-Karten, droppt nichts (es gibt kein eingebautes Set).
-
-Fürs Spielen konfigurierter Spiele gibt es **1 Karte pro 30 Min Spielzeit**, max.
-**12 Karten/Tag**. 6 Seltenheiten (Common→Mythic), zufällige gewichtete Drops.
-**Erfordert das Presence Intent** (siehe unten).
-
-### Booster & Yami-Karten (`/booster`, `/yamicard`)
-
-Zweites, eigenständiges Kartensystem (getrennter Pool & Sammlung):
-
-| Command | Beschreibung | Wer? |
-|---|---|---|
-| `/booster buy <typ> [anzahl]` | Booster-Packs mit Coins kaufen | alle |
-| `/booster open <typ>` | Ein Pack öffnen → zufällige Karten | alle |
-| `/booster packs` | Ungeöffnete Packs anzeigen | alle |
-| `/booster collection [user]` | Yami-Karten-Sammlung | alle |
-| `/booster card <karte>` | Eine Yami-Karte ansehen | alle |
-| `/yamicard add <name> <seltenheit> <bild-url>` | Yami-Karte anlegen (Bild-URL Pflicht) | Server verwalten / Admin |
-| `/yamicard remove <karte>` / `list` | Karte entfernen / alle anzeigen | Server verwalten / Admin |
-
-Pack-Tiers (in `cogs/booster.py` anpassbar): **Standard** (2.000 Coins, 5 Karten) und
-**Premium** (5.000 Coins, 5 Karten, bessere Chancen auf seltene Karten). Packs werden
-mit Coins gekauft, sammeln sich an und werden mit `/booster open` geöffnet; die Karten
-landen in der separaten Yami-Karten-Sammlung. Auch im `/shop` gelistet.
-
-## Persistenz
-
-- **Auto-Delete:** aktivierte Channels und gemerkte Code-Message-IDs in
-  `config.json`.
-- **Alles andere:** XP/Level/Coins, Daily-Streaks, Shop-Effekte, Spiel-Statistiken,
-  Freundschaften, Interaction-Zähler, Channel-/Rollen-Einstellungen und überwachte
-  Quellen in der SQLite-Datenbank `bot.db`.
-
-Beide werden beim ersten Start automatisch angelegt, überleben Neustarts und sind
-in der `.gitignore` ausgeschlossen (enthalten Server-/User-Daten).
-
-## Dauerbetrieb (systemd)
-
-Auf dem Zielsystem läuft der Bot als systemd-User-Service `oaken-bot.service`
-(Auto-Restart bei Absturz, Autostart beim Booten). Nützliche Befehle:
+## Entwickeln & prüfen
 
 ```bash
-systemctl --user status oaken-bot      # Status
-systemctl --user restart oaken-bot     # nach Code-Änderungen neu starten
-journalctl --user -u oaken-bot -f      # Live-Logs
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+bash scripts/check.sh
 ```
 
-Nach Änderungen an `bot.py` oder den Cogs jeweils `systemctl --user restart
-oaken-bot` ausführen.
+Der Check führt Python-Kompilierung, `pytest`, die TypeScript-Prüfung und den
+Produktionsbuild des Frontends aus. Dieselben Prüfungen laufen in
+[GitHub Actions](https://github.com/MGCrafter/yamikun/actions/workflows/checks.yml).
+
+[Entwicklungsanleitung](docs/development.md) ·
+[Einrichtung](docs/setup.md) ·
+[Deployment & Backups](docs/deployment.md) ·
+[Twitch-Chatbot](docs/twitch-chat.md) ·
+[Historische Dokumentation](docs/archive/README.md)

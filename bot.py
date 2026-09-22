@@ -8,7 +8,7 @@ Features:
 - cogs/leveling.py  — XP/Level aus Nachrichten & Voice, Coins (/rank, /leaderboard, /level)
 - cogs/announcer.py — Announce neuer Beiträge überwachter Quellen (/announce)
 
-Siehe oaken-tower-bot-spec.md und README.md für Details.
+Siehe docs/archive/oaken-tower-bot-spec.md und README.md für Details.
 """
 
 from __future__ import annotations
@@ -39,17 +39,28 @@ COGS: tuple[str, ...] = (
     "cogs.gambling",
     "cogs.blackjack",
     "cogs.slots",
+    "cogs.roulette",
     "cogs.economy",
     "cogs.shop",
     "cogs.interactions",
     "cogs.social",
+    "cogs.achievements",
     "cogs.lfg",
     "cogs.marry",
     "cogs.titles",
     "cogs.gamecards",
     "cogs.booster",
+    "cogs.fusion",
     "cogs.profile",
     "cogs.moderation",
+    "cogs.voicemaster",
+    "cogs.reactionroles",
+    "cogs.tickets",
+    "cogs.welcome",
+    "cogs.boostnotify",
+    "cogs.twitch",
+    "cogs.autoroles",
+    "cogs.audit",
     "cogs.fun",
     "cogs.help",
     "cogs.webpanel",
@@ -67,12 +78,16 @@ class OakenTowerBot(commands.Bot):
 
     def __init__(self) -> None:
         intents = discord.Intents.default()
-        intents.message_content = True  # Codes erkennen + Nachrichten-XP
-        # Presence/Members nur, wenn aktiviert — sonst stürzt der Bot ab, falls die
-        # privilegierten Intents im Developer Portal nicht eingeschaltet sind.
+        intents.message_content = True  # Codes erkennen, Nachrichten-XP, Audit-Log
+        # Members-Intent wird für Welcome-Nachrichten, das Audit-Log (Join/Leave,
+        # Rollen-/Nick-Änderungen) und das Entfernen von Reaction Roles gebraucht.
+        # WICHTIG: "Server Members Intent" muss im Developer Portal aktiviert sein,
+        # sonst startet der Bot nicht.
+        intents.members = True
+        # Presence nur optional (Aktivitäts-Tracking für Karten-Rewards) — eigener
+        # privilegierter Intent, daher hinter einem Schalter.
         if os.environ.get("PRESENCE_INTENT") == "1":
             intents.presences = True
-            intents.members = True
         super().__init__(command_prefix="!", intents=intents)
         self.db = Database(DB_FILE)
 
@@ -138,10 +153,15 @@ async def on_app_command_error(
         logger.exception("Unerwarteter Fehler in einem Command: %s", error)
         message = "⚠️ Es ist ein Fehler aufgetreten."
 
-    if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True)
-    else:
-        await interaction.response.send_message(message, ephemeral=True)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        # Interaction ist evtl. schon abgelaufen/unbekannt (10062) — dann gibt es
+        # nichts mehr zu antworten; kein Folge-Crash provozieren.
+        pass
 
 
 def main() -> None:
@@ -151,7 +171,15 @@ def main() -> None:
             f"Umgebungsvariable {TOKEN_ENV} ist nicht gesetzt. "
             "Token setzen oder in einer .env-Datei hinterlegen."
         )
-    bot.run(token, log_handler=None)
+    try:
+        bot.run(token, log_handler=None)
+    except discord.errors.PrivilegedIntentsRequired:
+        raise SystemExit(
+            "FEHLER: Privilegierte Intents fehlen. Aktiviere im Discord Developer Portal "
+            "(Bot → Privileged Gateway Intents) sowohl 'Message Content Intent' ALS AUCH "
+            "'Server Members Intent' und starte den Bot neu. (Für Karten-Rewards fürs "
+            "Spielen zusätzlich 'Presence Intent' + PRESENCE_INTENT=1.)"
+        )
 
 
 if __name__ == "__main__":

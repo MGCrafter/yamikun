@@ -82,20 +82,21 @@ class GamblingCog(commands.Cog):
 
         row = self.db.get_user(guild.id, interaction.user.id)
         balance = int(row["coins"])
-        if einsatz > balance:
+        # Einsatz atomar abbuchen (nur wenn das Guthaben reicht) – verhindert Races.
+        if not self.db.spend_coins(guild.id, interaction.user.id, einsatz):
             await interaction.response.send_message(
                 f"⚠️ Du hast nur **{balance}** {coin}, das reicht nicht für **{einsatz}**.",
                 ephemeral=True,
             )
             return
 
-        # Ergebnis bestimmen und Coins sofort atomar verbuchen (verhindert Races).
+        # Ergebnis bestimmen; bei Gewinn den doppelten Einsatz zurückzahlen.
         boosted = self.db.consume_charge(guild.id, interaction.user.id, "luck")
         win = random.random() < (LUCK_WIN_CHANCE if boosted else WIN_CHANCE)
         chosen = seite.value
         landed = chosen if win else ("tail" if chosen == "head" else "head")
-        net = einsatz if win else -einsatz
-        new_balance = self.db.add_coins(guild.id, interaction.user.id, net)
+        payout = einsatz * 2 if win else 0
+        new_balance = self.db.add_coins(guild.id, interaction.user.id, payout)
         self.db.record_game(guild.id, interaction.user.id, "coinflip", "win" if win else "loss")
 
         author_name = interaction.user.display_name

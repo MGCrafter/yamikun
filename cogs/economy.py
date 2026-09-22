@@ -66,19 +66,21 @@ class EconomyCog(commands.Cog):
         self.db.set_daily(gid, uid, now, streak)
         new_balance = self.db.add_coins(gid, uid, reward)
 
-        embed = discord.Embed(title="🎁 Daily Reward", color=0xF1C40F)
-        embed.set_author(
-            name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url
+        embed = discord.Embed(
+            title=f"🎁  +{_fmt(reward)} {coin}",
+            description="Tägliche Belohnung abgeholt." + (
+                f"\n🔥 inkl. **+{WEEK_BONUS}** Wochen-Bonus!" if bonus else ""
+            ),
+            color=0xA3E635,
         )
-        reward_text = f"+{_fmt(reward)} {coin}"
-        if bonus:
-            reward_text += f"\n🔥 inkl. +{WEEK_BONUS} Wochen-Bonus!"
-        embed.add_field(name="Belohnung", value=reward_text, inline=True)
-        embed.add_field(name="Streak", value=f"{streak} 🔥", inline=True)
-        embed.add_field(name="Kontostand", value=f"{_fmt(new_balance)} {coin}", inline=True)
+        embed.set_author(name="✦  DAILY REWARD", icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="🔥 Streak", value=f"**{streak}** Tage", inline=True)
+        embed.add_field(name="💎 Kontostand", value=f"{_fmt(new_balance)} {coin}", inline=True)
         days_to_bonus = (7 - streak % 7) % 7
-        if days_to_bonus:
-            embed.set_footer(text=f"Noch {days_to_bonus} Tag(e) bis zum nächsten Wochen-Bonus.")
+        embed.set_footer(
+            text=f"Noch {days_to_bonus} Tag(e) bis zum Wochen-Bonus." if days_to_bonus
+            else "Komm morgen wieder, um deine Streak zu halten."
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="pay", description="Überweise einem anderen Mitglied Coins.")
@@ -103,14 +105,14 @@ class EconomyCog(commands.Cog):
             return
 
         balance = int(self.db.get_user(interaction.guild_id, interaction.user.id)["coins"])
-        if betrag > balance:
+        # Betrag atomar abbuchen (nur wenn das Guthaben reicht) – verhindert Races.
+        if not self.db.spend_coins(interaction.guild_id, interaction.user.id, betrag):
             await interaction.response.send_message(
                 f"⚠️ Du hast nur **{_fmt(balance)}** {coin}, das reicht nicht für **{_fmt(betrag)}**.",
                 ephemeral=True,
             )
             return
 
-        self.db.add_coins(interaction.guild_id, interaction.user.id, -betrag)
         self.db.add_coins(interaction.guild_id, user.id, betrag)
         logger.info("Pay: %s → %s : %d", interaction.user.id, user.id, betrag)
 

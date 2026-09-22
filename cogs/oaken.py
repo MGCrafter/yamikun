@@ -276,6 +276,7 @@ class OakenCog(commands.Cog):
         name="oaken",
         description="Steuerung des Oaken-Tower Auto-Delete.",
         guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @oaken.command(name="on", description="Aktiviert Auto-Delete im aktuellen Channel.")
@@ -332,7 +333,6 @@ class OakenCog(commands.Cog):
         name="reset",
         description="Vergisst gespeicherte Code-Message-IDs (löscht nichts, nur Tracking).",
     )
-    @app_commands.checks.has_permissions(manage_channels=True)
     async def oaken_reset(self, interaction: discord.Interaction) -> None:
         self.config.reset_channel(interaction.channel_id)
         logger.info("Tracking zurückgesetzt in Channel %s.", interaction.channel_id)

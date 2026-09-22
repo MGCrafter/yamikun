@@ -69,7 +69,7 @@ class TitlesCog(commands.Cog):
         embed = discord.Embed(
             title="🏷️ Titel",
             description="\n".join(lines) + "\n\nMit `/title set` auswählen, mit `/title clear` entfernen.",
-            color=0x5865F2,
+            color=0x7C3AED,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

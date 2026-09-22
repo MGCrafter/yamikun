@@ -14,9 +14,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs.nekos import fetch_gif_file
+
 logger = logging.getLogger("oaken-tower-bot")
 
-NEKOS_URL = "https://nekos.best/api/v2/{}"
 FRIEND_XP = 10  # Freundschafts-XP pro Interaction
 
 # action → Satzbaustein, Emoji, Embed-Farbe
@@ -44,16 +45,11 @@ class InteractionsCog(commands.Cog):
         if self.session:
             await self.session.close()
 
-    async def _fetch_gif(self, action: str) -> Optional[str]:
+    async def _fetch_gif(self, action: str) -> Optional[discord.File]:
         if self.session is None:
             return None
         try:
-            async with self.session.get(
-                NEKOS_URL.format(action), timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                return data["results"][0]["url"]
+            return await fetch_gif_file(self.session, action, filename=f"{action}.gif")
         except Exception as exc:  # noqa: BLE001
             logger.warning("nekos.best-Abruf fehlgeschlagen (%s): %s", action, exc)
             return None
@@ -66,6 +62,7 @@ class InteractionsCog(commands.Cog):
             )
             return
 
+        await interaction.response.defer()
         gif = await self._fetch_gif(action)
 
         if target.id == interaction.user.id:
@@ -74,8 +71,10 @@ class InteractionsCog(commands.Cog):
                 color=cfg["color"],
             )
             if gif:
-                embed.set_image(url=gif)
-            await interaction.response.send_message(embed=embed)
+                embed.set_image(url=f"attachment://{gif.filename}")
+            await interaction.edit_original_response(
+                embed=embed, attachments=[gif] if gif else []
+            )
             return
 
         count = self.db.add_interaction(interaction.guild_id, interaction.user.id, target.id, action)
@@ -86,9 +85,9 @@ class InteractionsCog(commands.Cog):
             color=cfg["color"],
         )
         if gif:
-            embed.set_image(url=gif)
+            embed.set_image(url=f"attachment://{gif.filename}")
         embed.set_footer(text=f"Schon {count}× · +{FRIEND_XP} Freundschafts-XP")
-        await interaction.response.send_message(embed=embed)
+        await interaction.edit_original_response(embed=embed, attachments=[gif] if gif else [])
 
     @app_commands.command(name="hug", description="Umarme jemanden.")
     @app_commands.guild_only()
