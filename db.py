@@ -1193,9 +1193,11 @@ class Database:
     ) -> None:
         self._ensure_settings(guild_id)
         self.conn.execute(
-            "UPDATE guild_settings SET twitch_enabled = ?, twitch_login = ?, twitch_channel_id = ?, "
-            "twitch_message = ?, twitch_mention_role_id = ?, twitch_last_stream_id = NULL WHERE guild_id = ?",
-            (1 if enabled else 0, login, channel_id, message, mention_role_id, guild_id),
+            "UPDATE guild_settings SET twitch_last_stream_id = CASE "
+            "WHEN twitch_login IS ? AND twitch_channel_id IS ? THEN twitch_last_stream_id ELSE NULL END, "
+            "twitch_enabled = ?, twitch_login = ?, twitch_channel_id = ?, "
+            "twitch_message = ?, twitch_mention_role_id = ? WHERE guild_id = ?",
+            (login, channel_id, 1 if enabled else 0, login, channel_id, message, mention_role_id, guild_id),
         )
         self.conn.commit()
 

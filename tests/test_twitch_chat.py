@@ -357,9 +357,10 @@ async def test_timers_live_offline_failure_disabled_and_spacing(store, configure
     assert store.conn.execute("SELECT COUNT(*) FROM twitch_chat_events").fetchone()[0] == 2
     service._live.clear()
     service.api.side_effect = TwitchError("twitch_503", 503)
-    with pytest.raises(TwitchError):
-        await service.schedule_auto_messages(1180)
-    assert store.conn.execute("SELECT COUNT(*) FROM twitch_chat_events").fetchone()[0] == 2
+    await service.schedule_auto_messages(1180)
+    assert store.conn.execute("SELECT COUNT(*) FROM twitch_chat_events").fetchone()[0] == 3
+    assert json.loads(store.conn.execute("SELECT result FROM twitch_chat_events ORDER BY created DESC LIMIT 1").fetchone()[0])["auto_message"]["id"] == "b"
+    assert store.dashboard("100")["diagnostics"]["live_error"]
     store.configure("100", False, store.channel("100")["settings"], now=1180)
     await service.schedule_auto_messages(1300)
     assert store.conn.execute("SELECT COUNT(*) FROM twitch_chat_timers").fetchone()[0] == 0
@@ -731,7 +732,7 @@ async def test_failed_delivery_reports_reason_without_repeating_command(store, c
         dashboard = store.dashboard("100")["channel"]
         assert dashboard["status"] == "error" and hint in dashboard["error"]
         assert "private-response-content" not in dashboard["error"]
-        assert store.conn.execute("SELECT delivered,attempts FROM twitch_chat_events").fetchone()[:] == (1, 1)
+        assert store.conn.execute("SELECT delivered,attempts,payload FROM twitch_chat_events").fetchone()[:] == (1, 1, "{}")
         assert service.engine.balance("100", "10") == 500
         assert service.engine.balance("200", "10") == 0
     finally:
@@ -770,9 +771,13 @@ async def test_reconcile_does_not_clear_delivery_errors_and_errors_survive_resta
 @pytest.mark.parametrize("status", [429, 500])
 async def test_retry_sends_committed_reply_and_clears_delivery_error(store, configured, monkeypatch, status):
     service = Service(store.conn, "https://yamikun.eu")
+    clock = [time.time()]
+    monkeypatch.setattr("twitch_chat.service.time.time", lambda: clock[0])
     result = run(service.engine, now=time.time())
     real_sleep = asyncio.sleep
+    sent_at = []
     async def fast_sleep(delay):
+        clock[0] += delay
         await real_sleep(0)
     monkeypatch.setattr("twitch_chat.service.asyncio.sleep", fast_sleep)
     retried = asyncio.Event()
@@ -780,9 +785,10 @@ async def test_retry_sends_committed_reply_and_clears_delivery_error(store, conf
     async def api(*args, **kwargs):
         nonlocal attempts
         attempts += 1
+        sent_at.append(clock[0])
         assert kwargs["json"]["message"] == result["reply"]
         if attempts == 1:
-            raise TwitchError(f"twitch_{status}", status)
+            raise TwitchError(f"twitch_{status}", status, retry_after=37 if status == 429 else 0)
         assert "fehlgeschlagen" in store.dashboard("100")["channel"]["error"]
         retried.set()
         return {"data": [{"is_sent": True}]}
@@ -792,9 +798,281 @@ async def test_retry_sends_committed_reply_and_clears_delivery_error(store, conf
         await asyncio.wait_for(retried.wait(), 1)
         await real_sleep(0)
         assert attempts == 2
+        assert sent_at[1] - sent_at[0] >= (37 if status == 429 else 5)
         assert store.dashboard("100")["channel"]["error"] == ""
         assert service.engine.balance("100", "10") == 500
         assert store.conn.execute("SELECT delivered,attempts FROM twitch_chat_events").fetchone()[:] == (1, 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset,expected", [("1042", 42), ("999", 0), ("invalid", 0), ("nan", 0), ("inf", 0), (None, 0)])
+async def test_http_rate_limit_preserves_reset_delay(store, configured, monkeypatch, reset, expected):
+    service = Service(store.conn, "https://yamikun.eu")
+    monkeypatch.setattr("twitch_chat.service.time.time", lambda: 1000)
+
+    async def upstream(request):
+        return web.json_response({"message": "Too Many Requests"}, status=429,
+                                 headers={"Ratelimit-Reset": reset} if reset is not None else {})
+
+    app = web.Application()
+    app.router.add_post("/chat/messages", upstream)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        service.http = session
+        with pytest.raises(TwitchError) as failure:
+            await service.request("POST", server.make_url("/chat/messages"))
+    assert failure.value.status == 429
+    assert failure.value.retry_after == expected
+
+
+def custom_command(**patch):
+    return {"id": "discord", "name": "discord", "response": "Hallo {user}, willkommen bei {channel}! {target}: {args}",
+            "enabled": True, "aliases": ["dc"], "user_level": "everyone", "cooldown": 10, "user_cooldown": 30, **patch}
+
+
+@pytest.mark.parametrize("patch", [
+    {"name": "daily"}, {"name": "balance"}, {"name": "!test"}, {"name": "ümlaut"},
+    {"aliases": ["coins"]}, {"aliases": ["dc", "DC"]}, {"aliases": ["discord"]}, {"aliases": "dc"},
+    {"response": ""}, {"response": "x" * 501}, {"response": "one\ntwo"}, {"response": "\u200b"},
+    {"user_level": "admin"}, {"enabled": 1}, {"cooldown": True}, {"cooldown": -1},
+    {"user_cooldown": 86401}, {"id": "bad:*"}, {"extra": "no"},
+])
+def test_custom_commands_strict_validation(patch):
+    with pytest.raises(ValueError):
+        settings({**DEFAULTS, "custom_commands": [custom_command(**patch)]})
+
+
+def test_custom_commands_validate_collection_and_case():
+    for value in (None, {}, [None], [custom_command()] * 2,
+                  [custom_command(id=str(i), name=f"command{i}", aliases=[]) for i in range(51)],
+                  [custom_command(), custom_command(id="two", name="DC", aliases=[])]):
+        with pytest.raises(ValueError):
+            settings({**DEFAULTS, "custom_commands": value})
+    result = settings({**DEFAULTS, "custom_commands": [custom_command(name=" Discord ", aliases=["DC"])]})
+    assert result["custom_commands"][0]["name"] == "discord"
+    assert result["custom_commands"][0]["aliases"] == ["dc"]
+
+
+def test_custom_cooldowns_aliases_restarts_and_builtin_independence(store):
+    store.configure("100", True, {**DEFAULTS, "prefix": "?", "custom_commands": [custom_command()]})
+    engine = Engine(store, "999")
+    first = run(engine, "?DC @neko {user}", now=1000)
+    assert first["reply"] == "Hallo @luna, willkommen bei channel100! @neko: @neko {user}"
+    assert run(Engine(Store(store.conn), "999"), "?DC @neko {user}", now=1001) == first
+    assert run(engine, "?discord", uid="20", now=1005, message_id="global") == {}
+    assert run(engine, "?discord", now=1011, message_id="personal") == {}
+    assert "reply" in run(engine, "?dc", uid="20", now=1011, message_id="other")
+    assert "reply" in run(engine, "?daily", now=1012, message_id="builtin")
+    assert "reply" in run(Engine(Store(store.conn), "999"), "?dc", now=1030, message_id="restart")
+    assert run(engine, "?discord", cid="200", now=1050, message_id="other-channel") == {}
+    assert "?discord" in run(engine, "?help", now=1050, message_id="help")["reply"]
+
+
+@pytest.mark.parametrize("level,uid,badges,allowed", [
+    ("everyone", "10", [], True), ("subscriber", "10", [], False),
+    ("subscriber", "10", ["founder"], True), ("subscriber", "10", ["vip"], True),
+    ("vip", "10", ["subscriber"], False), ("vip", "10", ["vip"], True),
+    ("moderator", "10", ["vip"], False), ("moderator", "10", ["moderator"], True),
+    ("broadcaster", "10", ["moderator"], False), ("broadcaster", "100", [], True),
+])
+def test_custom_command_permission_levels(store, level, uid, badges, allowed):
+    store.configure("100", True, {**DEFAULTS, "custom_commands": [custom_command(user_level=level)]})
+    result = run(Engine(store, "999"), "!discord", uid=uid, badges=[{"set_id": badge} for badge in badges])
+    assert bool(result.get("reply")) == allowed
+
+
+def test_custom_edits_cancel_queued_replies_and_automod_still_runs_first(store):
+    command = custom_command(response="x" * 499 + "{args}")
+    # Use valid template length but a long expansion.
+    command["response"] = "{args}" * 50
+    store.configure("100", True, {**DEFAULTS, "custom_commands": [command]})
+    engine = Engine(store, "999")
+    assert len(run(engine, "!discord " + "x" * 100)["reply"]) == 500
+    store.configure("100", True, {**DEFAULTS, "custom_commands": [custom_command(enabled=False)]})
+    assert store.conn.execute("SELECT delivered,outcome FROM twitch_chat_events").fetchone()[:] == (1, "cancelled")
+    assert run(engine, "!discord", now=1050, message_id="disabled") == {}
+    store.configure("100", True, {**DEFAULTS, "automod_enabled": True, "block_links": True, "custom_commands": [custom_command()]})
+    assert "moderate" in run(engine, "!discord https://example.com", now=1060, message_id="moderated")
+    assert store.conn.execute("SELECT COUNT(*) FROM twitch_chat_command_cooldowns").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_custom_commands_api_roundtrip_legacy_tabs_and_webhook_delivery(panel):
+    panel, client = panel
+    login_session(panel, client)
+    panel.store.save_account("999", "bot", "yami", "Yami", "encrypted")
+    cfg = {**DEFAULTS, "custom_commands": [custom_command()]}
+    headers = {"X-CSRF-Token": "csrf"}
+    assert (await client.post("/api/twitch/settings", json={"enabled": True, "settings": cfg})).status == 403
+    response = await client.post("/api/twitch/settings", json={"enabled": True, "settings": cfg}, headers=headers)
+    assert response.status == 200
+    assert (await response.json())["channel"]["settings"]["custom_commands"] == cfg["custom_commands"]
+    legacy = {k: v for k, v in DEFAULTS.items() if k not in {"custom_commands", "auto_messages"}}
+    assert (await client.post("/api/twitch/settings", json={"enabled": True, "settings": legacy}, headers=headers)).status == 200
+    assert panel.store.channel("100")["settings"]["custom_commands"] == cfg["custom_commands"]
+    assert panel.store.channel("200")["settings"]["custom_commands"] == []
+    raw, signature = signed(panel, event("!dc @neko"))
+    for _ in range(2):
+        assert (await client.post("/twitch/eventsub", data=raw, headers=signature)).status == 204
+    panel.service.api = AsyncMock(return_value={"data": [{"is_sent": True}]})
+    tasks = [asyncio.create_task(panel.service.process()), asyncio.create_task(panel.service.deliver(False))]
+    try:
+        for _ in range(50):
+            await asyncio.sleep(.01)
+            if panel.store.conn.execute("SELECT delivered FROM twitch_chat_events").fetchone()[0]:
+                break
+        panel.service.api.assert_awaited_once()
+        assert "@neko" in panel.service.api.call_args.kwargs["json"]["message"]
+        fresh = await (await client.get("/api/twitch/me")).json()
+        assert fresh["diagnostics"]["last_received"]
+        assert fresh["diagnostics"]["last_sent"]
+        assert fresh["diagnostics"]["pending"] == 0
+        assert "daily" in fresh["reserved_command_names"]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def test_fair_queue_prioritizes_commands_and_keeps_channel_order_after_restart(store):
+    engine = Engine(store, "999")
+    for i in range(3):
+        run(engine, "!coins", now=1000 + i * 5, message_id=f"a{i}")
+    run(engine, "!coins", cid="200", now=1015, message_id="b")
+    store.queue_auto_message("200", auto_message(live_only=False), 900)
+    first = store.next_delivery(False, 1020)
+    assert first["id"] == "100:a0"
+    store.dispatch_attempt("100", False, 1020)
+    store.finish(first["id"], "sent")
+    restarted = Store(store.conn)
+    assert restarted.next_delivery(False, 1021) is None  # global throttle survives restart
+    second = restarted.next_delivery(False, 1022)
+    assert second["id"] == "200:b"
+    restarted.dispatch_attempt("200", False, 1022)
+    restarted.finish(second["id"], "sent")
+    assert restarted.next_delivery(False, 1024)["id"] == "100:a1"
+
+
+def test_overload_does_not_charge_coins_or_consume_daily(store):
+    engine = Engine(store, "999")
+    run(engine, "!daily", now=1000)
+    for i in range(9):
+        run(engine, "!coins", uid=str(20 + i), now=1001, message_id=str(i))
+    assert not store.reply_capacity("100", 1002)
+    assert run(engine, "!slots 50", now=1010, message_id="overload") == {}
+    assert engine.balance("100", "10") == 500
+    assert run(engine, "!daily", uid="40", now=1010, message_id="daily-overload") == {}
+    assert engine.balance("100", "40") == 0
+    assert store.conn.execute("SELECT daily_at FROM twitch_chat_wallets WHERE user_id='40'").fetchone()[0] == 0
+    assert store.conn.execute("SELECT outcome FROM twitch_chat_events WHERE id='100:overload'").fetchone()[0] == "overloaded"
+    assert "reply" in run(engine, "!daily", cid="200", now=1010, message_id="room-in-other")
+    store.finish("100:msg-1", "sent")
+    assert "reply" in run(engine, "!daily", uid="40", now=1011, message_id="after-space")
+
+
+def test_expiry_and_pause_finalize_moderation_logs_and_diagnostics(store, monkeypatch):
+    now = time.time()
+    store.configure("100", True, {**DEFAULTS, "automod_enabled": True, "block_links": True})
+    engine = Engine(store, "999")
+    run(engine, "https://example.com", now=now - 121)
+    store.expire_deliveries(now)
+    assert store.conn.execute("SELECT outcome FROM twitch_chat_modlog").fetchone()[0] == "expired"
+    run(engine, "https://example.com", now=now, message_id="new")
+    store.configure("100", False, store.channel("100")["settings"])
+    assert [r[0] for r in store.conn.execute("SELECT outcome FROM twitch_chat_modlog ORDER BY id")] == ["expired", "cancelled"]
+    diagnostic = Store(store.conn).dashboard("100")["diagnostics"]
+    assert diagnostic["expired_24h"] == 1
+    assert diagnostic["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_for_one_channel_does_not_block_another(store, configured, monkeypatch):
+    service = Service(store.conn, "https://yamikun.eu")
+    clock = [time.time()]
+    monkeypatch.setattr("twitch_chat.service.time.time", lambda: clock[0])
+    run(service.engine, now=clock[0])
+    run(service.engine, cid="200", now=clock[0], message_id="second")
+    real_sleep = asyncio.sleep
+    async def tick(delay):
+        clock[0] += delay
+        await real_sleep(0)
+    monkeypatch.setattr("twitch_chat.service.asyncio.sleep", tick)
+    calls = []
+    async def api(*args, **kwargs):
+        cid = kwargs["json"]["broadcaster_id"]
+        calls.append((cid, clock[0]))
+        if len(calls) == 1:
+            raise TwitchError("twitch_503", 503)
+        return {"data": [{"is_sent": True}]}
+    service.api = api
+    task = asyncio.create_task(service.deliver(False))
+    try:
+        for _ in range(100):
+            await real_sleep(0)
+            if len(calls) >= 3:
+                break
+        assert [cid for cid, _ in calls] == ["100", "200", "100"]
+        assert calls[1][1] - calls[0][1] < 5
+        assert calls[2][1] - calls[0][1] >= 5
+        assert service.engine.balance("100", "10") == 500
+        assert store.conn.execute("SELECT COUNT(*) FROM twitch_chat_events WHERE outcome='sent'").fetchone()[0] == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_event_table_migration_keeps_pending_messages(tmp_path):
+    db = Database(str(tmp_path / "legacy.db"))
+    with db.conn:
+        db.conn.execute("""CREATE TABLE twitch_chat_events (id TEXT PRIMARY KEY,channel_id TEXT NOT NULL,
+            payload TEXT NOT NULL,created REAL NOT NULL,processed INTEGER NOT NULL DEFAULT 0,
+            result TEXT,delivered INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0)""")
+        db.conn.execute("INSERT INTO twitch_chat_events(id,channel_id,payload,created,processed,result) VALUES('old','100','{}',1000,1,?)", (json.dumps({"reply": "kept"}),))
+    store = Store(db.conn)
+    assert store.next_delivery(False, 1001)["id"] == "old"
+    assert Store(db.conn).next_delivery(False, 1001)["result"] == '{"reply": "kept"}'
+    db.close()
+
+
+def test_global_reply_capacity_and_moderation_rate_limit_are_separate(store):
+    engine = Engine(store, "999")
+    for index in range(5):
+        uid = str(300 + index)
+        store.save_account(uid, "channel", "channel" + uid, "Channel", "encrypted")
+        store.configure(uid, True, dict(DEFAULTS))
+        for message in range(10):
+            run(engine, "!coins", cid=uid, uid=str(message), message_id=str(message), now=1000)
+    assert not store.reply_capacity("100", 1000)
+    assert run(engine, "!daily", now=1001) == {}
+    assert engine.balance("100", "10") == 0
+    for uid in ("100", "200"):
+        store.configure(uid, True, {**DEFAULTS, "automod_enabled": True, "block_links": True})
+        assert "moderate" in run(engine, "https://example.com", cid=uid, now=1002, message_id="mod")
+    with store.conn:
+        store.defer_dispatch("100", "moderation", 1040)
+    assert Store(store.conn).next_delivery(True, 1003)["channel_id"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_custom_edit_while_selected_cancels_delivery(store, configured, monkeypatch):
+    service = Service(store.conn, "https://yamikun.eu")
+    store.configure("100", True, {**DEFAULTS, "custom_commands": [custom_command()]})
+    run(service.engine, "!discord", now=time.time())
+    service.api = AsyncMock(return_value={"data": [{"is_sent": True}]})
+    real_sleep = asyncio.sleep
+    async def edit_during_yield(delay):
+        if delay == 0:
+            store.configure("100", True, {**DEFAULTS, "custom_commands": [custom_command(response="Changed")]})
+        await real_sleep(0)
+    monkeypatch.setattr("twitch_chat.service.asyncio.sleep", edit_during_yield)
+    task = asyncio.create_task(service.deliver(False))
+    try:
+        for _ in range(10):
+            await real_sleep(0)
+        service.api.assert_not_awaited()
+        assert store.conn.execute("SELECT outcome,payload FROM twitch_chat_events").fetchone()[:] == ("cancelled", "{}")
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

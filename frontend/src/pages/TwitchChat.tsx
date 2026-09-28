@@ -1,26 +1,31 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Icon } from "../components/Icon";
 import { ThemeToggle } from "../components/ui/ThemeToggle";
 import { Field } from "../components/ui/Field";
 import { TwitchAutoMessages, type AutoMessage } from "../components/TwitchAutoMessages";
+import { TwitchCustomCommands, commandErrors, type CustomCommand } from "../components/TwitchCustomCommands";
+import { TwitchDiagnostics, type Diagnostics } from "../components/TwitchDiagnostics";
 
 type Settings = {
   prefix: string; social_enabled: boolean; gambling_enabled: boolean;
   automod_enabled: boolean; block_links: boolean; block_caps: boolean; block_spam: boolean;
   blocked_words: string[]; timeout_seconds: number; command_cooldown: number;
   max_bet: number; daily_coins: number; auto_messages: AutoMessage[];
+  custom_commands: CustomCommand[];
 };
 type Data = {
   authenticated: boolean; configured: boolean; bot_ready: boolean; bot_login: string | null;
   can_setup_bot?: boolean;
   csrf?: string; user?: { id: string; login: string; display_name: string };
-  channel?: { enabled: boolean; status: string; error: string; connection_error?: string; settings: Settings };
+  channel?: { enabled: boolean; status: string; error: string; connection_error?: string; connection_status?: string; settings: Settings };
   commands: { usage: string; description: string }[];
   discord_link?: { id: string; name: string } | null;
   discord_session?: { id: string; name: string } | null;
   leaderboard?: { login: string; coins: number }[];
   moderation_log?: { login: string; reason: string; action: string; created: number; outcome: string }[];
+  reserved_command_names?: string[];
+  diagnostics?: Diagnostics;
 };
 const ERRORS: Record<string, string> = {
   state: "Die Anmeldung ist abgelaufen oder gehört zu einem anderen Anmeldeversuch. Bitte starte sie in diesem Browser erneut.",
@@ -72,24 +77,28 @@ export default function TwitchChat() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [words, setWords] = useState("");
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [retry, setRetry] = useState(0);
+  const form = useRef<HTMLFormElement>(null);
+  const revision = useRef(0);
 
   useEffect(() => {
     let active = true;
     const load = async () => {
+      const before = revision.current;
       try {
         const next = await request("me");
-        if (!active) return;
+        if (!active || before !== revision.current) return;
         setData(next);
-        setError("");
+        setLoadError("");
         if (next.channel) {
           setSettings(current => current ?? next.channel!.settings);
         }
       } catch (e) {
-        if (active) setError(e instanceof Error ? e.message : "Verbindung fehlgeschlagen.");
+        if (active && before === revision.current) setLoadError(e instanceof Error ? e.message : "Verbindung fehlgeschlagen.");
       }
     };
     void load();
@@ -105,14 +114,25 @@ export default function TwitchChat() {
     setNotice("");
   }
 
-  async function action(path: string, body: unknown, success: string) {
+  async function action(path: string, body: unknown, success: string, preserveDraft = false) {
     if (busy) return;
+    if (path === "settings" && !preserveDraft) {
+      if (form.current && !form.current.reportValidity()) return;
+      const index = commandErrors(settings?.custom_commands ?? [], data?.reserved_command_names ?? []).findIndex(Boolean);
+      if (index >= 0) {
+        setError("Bitte prüfe die markierten eigenen Commands.");
+        document.getElementById(`command-name-${settings!.custom_commands[index].id}`)?.focus();
+        return;
+      }
+    }
+    revision.current += 1;
     setBusy(true); setError(""); setNotice("");
     try {
       const next = await request(path, data?.csrf, body);
+      revision.current += 1;
       if (path === "logout") { window.location.assign("/twitch"); return; }
       setData(next);
-      if (path === "settings" && next.channel) {
+      if (path === "settings" && next.channel && !preserveDraft) {
         setSettings(next.channel.settings); setDirty(false);
       }
       setNotice(success);
@@ -146,7 +166,7 @@ export default function TwitchChat() {
 
       <main className="pb-16">
         <div className="mt-6 space-y-3" aria-live="polite">
-          {(error || queryError) && <div className="twitch-feedback twitch-feedback-error" role="alert">{error || ERRORS[queryError!] || "Twitch-Anmeldung fehlgeschlagen. Bitte erneut versuchen."}
+          {(error || loadError || queryError) && <div className="twitch-feedback twitch-feedback-error" role="alert">{error || loadError || ERRORS[queryError!] || "Twitch-Anmeldung fehlgeschlagen. Bitte erneut versuchen."}
             {!data && <button className="btn btn-ghost ml-3" onClick={() => setRetry(v => v + 1)}>Erneut laden</button>}
           </div>}
           {notice && <div className="twitch-feedback" role="status">{notice}</div>}
@@ -200,11 +220,11 @@ export default function TwitchChat() {
             {!data.bot_ready && <p className="mt-3 text-sm text-muted">Der Button startet die Twitch-Freigabe direkt in diesem Browser. Nach der Bestätigung kannst du Yami mit deinem Streamer-Konto hinzufügen.</p>}
           </Section>}
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
-            <form onSubmit={save} className="min-w-0 space-y-6">
+            <form ref={form} onSubmit={save} className="min-w-0 space-y-6">
               <fieldset disabled={busy} className="min-w-0 space-y-6 disabled:opacity-70">
                 <Section title="Yami in deinem Channel">
                   <p className="mb-5 text-muted">{channel.enabled ? `Yami antwortet als ${data?.bot_login ?? "dein Bot"}. Beim Pausieren werden offene Runden abgerechnet.` : "Füge Yami hinzu, damit er auf Commands reagiert und deine aktivierten Chat-Regeln anwendet."}</p>
-                  <button type="button" className={channel.enabled ? "btn btn-ghost" : "btn-primary"} disabled={!channel.enabled && (!data?.configured || !data?.bot_ready)} onClick={() => void action("settings", { enabled: !channel.enabled, settings: { ...settings, blocked_words: words.split("\n").map(w => w.trim()).filter(Boolean) } }, channel.enabled ? "Yami ist pausiert." : "Yami wird mit deinem Chat verbunden. Das kann etwa eine Minute dauern.")}>{channel.enabled ? "Bot pausieren / entfernen" : "Bot zu meinem Channel hinzufügen"}</button>
+                  <button type="button" className={channel.enabled ? "btn btn-ghost" : "btn-primary"} disabled={!channel.enabled && (!data?.configured || !data?.bot_ready)} onClick={() => void action("settings", { enabled: !channel.enabled, settings: channel.enabled ? channel.settings : { ...settings, blocked_words: words.split("\n").map(w => w.trim()).filter(Boolean) } }, channel.enabled ? "Yami ist pausiert. Ungespeicherte Änderungen bleiben im Formular." : "Yami wird mit deinem Chat verbunden. Das kann etwa eine Minute dauern.", channel.enabled)}>{channel.enabled ? "Bot pausieren / entfernen" : "Bot zu meinem Channel hinzufügen"}</button>
                   <div className="mt-6 grid gap-4 sm:grid-cols-2">
                     <Field label="Command-Präfix" htmlFor="twitch-prefix" hint="1–3 Zeichen aus ! ? . $"><input id="twitch-prefix" className="field" required pattern="[!?.$]{1,3}" maxLength={3} value={settings.prefix} onChange={e => update("prefix", e.target.value)} /></Field>
                     <Field label="Command-Cooldown (Sekunden)" htmlFor="twitch-cooldown" hint="Pro Person; Blackjack-Aktionen: 1 Sekunde."><input id="twitch-cooldown" className="field" type="number" required min={2} max={120} value={settings.command_cooldown} onChange={e => update("command_cooldown", Number(e.target.value))} /></Field>
@@ -218,6 +238,9 @@ export default function TwitchChat() {
                   </div>
                   <p className="mt-4 text-sm text-muted">Nur virtuelle Coins, keine Käufe oder Auszahlungen. Discord-Shop-Effekte gelten nicht in Twitch-Spielen.</p>
                 </Section>
+                <Section title="Eigene Commands">
+                  <TwitchCustomCommands commands={settings.custom_commands ?? []} prefix={prefix} channel={data?.user?.login ?? "dein_channel"} botName={data?.bot_login ?? "Yami"} reserved={data?.reserved_command_names ?? []} onChange={commands => update("custom_commands", commands)} />
+                </Section>
                 <Section title="Automatische Nachrichten">
                   <TwitchAutoMessages messages={settings.auto_messages ?? []} botName={data?.bot_login ?? "Yami"} onChange={messages => update("auto_messages", messages)} />
                 </Section>
@@ -230,6 +253,7 @@ export default function TwitchChat() {
               </fieldset>
             </form>
             <aside className="min-w-0 space-y-6">
+              {data?.diagnostics && <Section title="Verbindung & Versand"><TwitchDiagnostics data={data.diagnostics} prefix={prefix} enabled={channel.enabled} connection={STATUS[channel.connection_status ?? channel.status] ?? "Verbindung prüfen"} /></Section>}
               <Section title="Deine Coins, verbunden">
                 <div className="mb-4 flex items-center gap-3 text-violet"><Icon name="twitch" size={25} /><span>+</span><Icon name="discord" size={25} /></div>
                 <p className="mb-4 text-sm leading-relaxed text-muted">Ohne Verknüpfung sammelst du eigene Coins pro Twitch-Channel. Mit Discord nutzt du überall dein Discord-Guthaben und ein gemeinsames Daily. Bestehende Twitch-Coins bleiben separat gespeichert.</p>
@@ -241,7 +265,7 @@ export default function TwitchChat() {
                 {data?.leaderboard?.length ? <ol className="space-y-4">{data.leaderboard.map((row, i) => <li key={`${row.login}-${i}`} className="flex items-center gap-3 text-sm"><span className="w-5 text-muted">{i + 1}.</span><span className="min-w-0 flex-1 truncate">{row.login}</span><strong className="font-mono">{row.coins.toLocaleString("de-DE")}</strong></li>)}</ol> : <p className="text-sm text-muted">Hier erscheinen deine Zuschauer, sobald sie im Chat schreiben. Mit {prefix}daily geht’s los.</p>}
               </Section>
               <Section title="Letzte AutoMod-Aktionen">
-                {data?.moderation_log?.length ? <ul className="space-y-4">{data.moderation_log.map((row, i) => <li key={`${row.created}-${i}`} className="border-b border-line pb-3 text-sm last:border-0 last:pb-0"><strong>{row.login}</strong><p className="mt-1 text-muted">{row.reason} · {row.action === "timeout" ? "Timeout" : "Nachricht gelöscht"}</p><p className="mt-1 text-xs text-muted">{new Date(row.created * 1000).toLocaleString("de-DE")} · {row.outcome === "ok" ? "Ausgeführt" : row.outcome === "failed" ? "Fehlgeschlagen" : "Ausstehend"}</p></li>)}</ul> : <p className="text-sm text-muted">Noch keine Aktionen. Wenn ein Filter greift, siehst du das Ergebnis hier.</p>}
+                {data?.moderation_log?.length ? <ul className="space-y-4">{data.moderation_log.map((row, i) => <li key={`${row.created}-${i}`} className="border-b border-line pb-3 text-sm last:border-0 last:pb-0"><strong>{row.login}</strong><p className="mt-1 text-muted">{row.reason} · {row.action === "timeout" ? "Timeout" : "Nachricht löschen"}</p><p className="mt-1 text-xs text-muted">{new Date(row.created * 1000).toLocaleString("de-DE")} · {({ ok: "Ausgeführt", failed: "Fehlgeschlagen", expired: "Abgelaufen", cancelled: "Abgebrochen", retry: "Wird erneut versucht" } as Record<string, string>)[row.outcome] ?? "Ausstehend"}</p></li>)}</ul> : <p className="text-sm text-muted">Noch keine Aktionen. Wenn ein Filter greift, siehst du das Ergebnis hier.</p>}
               </Section>
             </aside>
           </div>

@@ -15,6 +15,7 @@ from cogs.roulette import BETS, _is_win, _color_name
 from cogs.slots import PAYOUTS, DISPLAY, BASE_COPY
 from cogs.social import friend_level
 from twitch_chat.store import Store
+from twitch_chat.custom import BUILTIN_NAMES, permitted, render_response
 
 SOCIAL = {"hug": "umarmt", "pat": "tätschelt", "kiss": "küsst", "slap": "gibt eine spielerische Ohrfeige an", "highfive": "gibt ein High-Five an"}
 ALIASES = {"balance": "coins", "cf": "coinflip", "bj": "blackjack", "top": "leaderboard", "commands": "help"}
@@ -130,6 +131,7 @@ class Engine:
             cid, uid = event["broadcaster_user_id"], event["chatter_user_id"]
             channel = self.store.channel(cid)
             result = {}
+            outcome = "expired" if now - row["created"] >= 120 else "ignored"
             if channel and channel["enabled"] and uid != self.bot_id and now - row["created"] < 120:
                 cfg = channel["settings"]
                 self.touch(cid, uid, event["chatter_user_login"])
@@ -146,24 +148,49 @@ class Engine:
                         parts = message[len(cfg["prefix"]):].split()
                         if parts:
                             command = ALIASES.get(parts[0].lower(), parts[0].lower())
+                            custom = next((c for c in cfg["custom_commands"] if c["enabled"]
+                                           and parts[0].lower() in [c["name"], *c["aliases"]]
+                                           and permitted(c, event)), None)
                             # Resolve open hands even if the channel disabled the gambling module.
                             actions = {"hit", "stand", "double", "split"}
                             last = self.db.execute("SELECT command_at FROM twitch_chat_wallets WHERE channel_id=? AND user_id=?", (cid, uid)).fetchone()[0]
-                            if now - last >= (1 if command in actions else cfg["command_cooldown"]):
+                            ready = (self.custom_ready(cid, uid, custom, now) if custom else
+                                     command in BUILTIN_NAMES and now - last >= (1 if command in actions else cfg["command_cooldown"]))
+                            if ready and not self.store.reply_capacity(cid, now):
+                                outcome = "overloaded"
+                            elif ready:
                                 self.db.execute("SAVEPOINT command")
                                 try:
-                                    reply = self.command(cid, uid, command, parts[1:], cfg, now)
+                                    if custom:
+                                        reply = render_response(custom["response"], user=event["chatter_user_login"], channel=channel["login"], args=parts[1:])
+                                        for who, duration in (("*", custom["cooldown"]), (uid, custom["user_cooldown"])):
+                                            self.db.execute("INSERT OR REPLACE INTO twitch_chat_command_cooldowns VALUES(?,?,?,?)",
+                                                            (cid, custom["id"], who, now + duration))
+                                    else:
+                                        reply = self.command(cid, uid, command, parts[1:], cfg, now)
+                                        if command == "help":
+                                            names = [cfg["prefix"] + c["name"] for c in cfg["custom_commands"] if c["enabled"] and permitted(c, event)]
+                                            if names:
+                                                reply += " | Eigene: " + ", ".join(names)
                                 except CommandError as exc:
                                     self.db.execute("ROLLBACK TO command")
                                     reply = str(exc).replace("!", cfg["prefix"])
                                 finally:
                                     self.db.execute("RELEASE command")
                                 if reply:
-                                    self.db.execute("UPDATE twitch_chat_wallets SET command_at=? WHERE channel_id=? AND user_id=?", (now, cid, uid))
-                                    result = {"reply": f"@{event['chatter_user_login']} {reply}"[:500]}
-            self.db.execute("UPDATE twitch_chat_events SET processed=1,result=?,payload=? WHERE id=?",
-                            (json.dumps(result), json.dumps(event), row["id"]))
+                                    if custom:
+                                        result = {"reply": reply, "custom_command_id": custom["id"]}
+                                    else:
+                                        self.db.execute("UPDATE twitch_chat_wallets SET command_at=? WHERE channel_id=? AND user_id=?", (now, cid, uid))
+                                        result = {"reply": f"@{event['chatter_user_login']} {reply}"[:500]}
+            self.db.execute("UPDATE twitch_chat_events SET processed=1,result=?,payload=?,delivered=?,outcome=? WHERE id=?",
+                            (json.dumps(result), json.dumps(event) if result else "{}", int(not result), "" if result else outcome, row["id"]))
             return result
+
+    def custom_ready(self, cid, uid, command, now):
+        return not self.db.execute("""SELECT 1 FROM twitch_chat_command_cooldowns
+            WHERE channel_id=? AND command_id=? AND user_id IN ('*',?) AND until>?""",
+            (cid, command["id"], uid, now)).fetchone()
 
     def bet(self, text: str, cfg: dict) -> int:
         if not re.fullmatch(r"[0-9]{1,6}", text) or not 1 <= int(text) <= cfg["max_bet"]:

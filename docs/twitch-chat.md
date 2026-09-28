@@ -4,6 +4,9 @@
 unabhängig von den Discord-Servereinstellungen unter `/g/:gid/twitch`.
 Die bisherigen Live-Benachrichtigungen laufen unverändert weiter.
 
+Eine technische Bestandsaufnahme mit Vergleich zu Twitch, Nightbot,
+StreamElements und TwitchIO steht in [Twitch-Prüfung vom 28.09.2026](twitch-review-2026-09-28.md).
+
 ## Einmalige Einrichtung in CapRover
 
 1. Ein separates Twitch-Konto für Yami anlegen bzw. das vorhandene Botkonto nutzen.
@@ -150,6 +153,48 @@ Andere Personen müssen zuvor im Chat geschrieben haben, damit ihre stabile
 Twitch-ID bekannt ist. Namen allein werden nicht als dauerhafte Identität genutzt.
 Alle Beträge sind virtuelle Coins ohne Echtgeldkäufe oder Auszahlung.
 
+## Eigene Commands
+
+Im Twitch-Dashboard unter **Eigene Commands → Command hinzufügen** lassen sich
+bis zu 50 eigene Text-Commands pro Channel verwalten. Anschließend
+**Einstellungen speichern** wählen.
+
+- **Name:** ohne Präfix, 1–25 ASCII-Buchstaben, Ziffern oder Unterstriche;
+  der erste Buchstabe darf auch eine Ziffer sein. Beispiel: `discord` für `!discord`.
+  Namen werden kleingeschrieben. Standard-Commands und deren Aliasse sind reserviert.
+- **Antwort:** bis zu 500 Zeichen, einschließlich Links und Emotes, als eine Zeile.
+  Die Vorschau zeigt ein Beispiel mit den eingesetzten Platzhaltern.
+- **Aliasse:** bis zu fünf weitere Namen für denselben Command, etwa `dc, community`.
+  Namen müssen im gesamten Channel eindeutig sein, auch bei pausierten Commands.
+- **Rechte:** alle Zuschauer, Abonnenten einschließlich VIPs/Moderatoren,
+  VIPs einschließlich Moderatoren, Moderatoren oder nur der Broadcaster.
+  Founder zählen als Abonnenten; der Broadcaster darf alle eigenen Commands nutzen.
+- **Channel-Cooldown:** 0–3.600 Sekunden zwischen Nutzungen durch beliebige Personen.
+- **Persönlicher Cooldown:** zusätzlich 0–86.400 Sekunden pro Zuschauer.
+  Standard sind 10 bzw. 30 Sekunden; `0` deaktiviert die jeweilige Wartezeit.
+  Aliasse teilen sich beide Cooldowns, andere Commands bleiben unabhängig.
+
+| Platzhalter | Beispiel |
+| --- | --- |
+| `{user}` | `@luna`, die Person, die den Command auslöst |
+| `{channel}` | Twitch-Login des Channels |
+| `{target}` | Erster angegebener Twitch-Name, sonst die auslösende Person |
+| `{args}` | Text nach dem Command |
+
+Beispiel: `Hallo {user}! Unser Discord: https://discord.gg/dein-code`.
+Eigene Antworten bekommen keinen zusätzlichen automatischen Namens-Ping; dafür
+`{user}` einsetzen. Unbekannte Platzhalter bleiben wörtlich erhalten. Es werden
+keine Skripte oder externen Anfragen ausgeführt. Nach dem Ersetzen gilt weiterhin
+das Limit von 500 Zeichen. Eigene Commands erscheinen auch in `!help`, soweit die
+Person sie nutzen darf und die Antwortlänge reicht.
+
+AutoMod prüft eingehende Nachrichten weiterhin zuerst. Pausierte Commands,
+fehlende Rechte und aktive Cooldowns erzeugen keine Antwort. Commands und
+Cooldowns überstehen Neustarts. Bearbeiten, Pausieren oder Entfernen eines
+Commands verwirft noch wartende Antworten dieses Commands und setzt seine
+Cooldowns zurück. Das Speichern anderer Einstellungen lässt sie bestehen.
+Ältere geöffnete Dashboard-Tabs ohne das neue Feld löschen keine Commands.
+
 Die Blackjack-Anzeige nennt die eigenen Punkte und markiert die verdeckte
 Dealer-Karte ausdrücklich. `double` und `split` erscheinen nur, wenn Karten,
 Handanzahl und Guthaben die Aktion erlauben. Nach einem Split steht dort etwa
@@ -170,8 +215,8 @@ hinzufügen** wählen. Bis zu 20 Nachrichten sind pro Channel möglich:
   zählen nicht. `0` deaktiviert diese zusätzliche Bedingung.
 - **Nur senden, wenn ich live bin:** standardmäßig aktiviert. Der Livestatus
   wird bei fälligen Nachrichten über [Get Streams](https://dev.twitch.tv/docs/api/reference/#get-streams)
-  geprüft und höchstens eine Minute zwischengespeichert. Ohne bestätigten
-  Livestatus wird eine solche Nachricht nicht versendet.
+geprüft und höchstens eine Minute zwischengespeichert. Ohne bestätigten
+Livestatus wird eine solche Nachricht nicht versendet.
 - Jede Nachricht kann einzeln pausiert, bearbeitet oder entfernt werden.
 
 Mit **Einstellungen speichern** übernehmen. Intervall und Mindestaktivität
@@ -192,6 +237,9 @@ und die Mindestaktivität. Es sind keine zusätzlichen Twitch-Freigaben erforder
 Die neuen Tabellen werden beim Start automatisch ergänzt; bestehende Channels
 beginnen ohne Autonachrichten.
 
+Wenn Twitchs Livestatus-Abfrage ausfällt, warten nur Nachrichten mit
+Live-Bedingung. Andere fällige Timer können weiter eingeplant werden.
+
 ## AutoMod und Betrieb
 
 Eigene Filter ergänzen Twitchs eingebauten AutoMod: Links, Caps (mindestens
@@ -207,18 +255,50 @@ nach einem Neustart neu.
 Webhooks werden schnell bestätigt und dauerhaft zwischengespeichert. Chat-ID,
 Spielmutation und Ergebnis werden atomar verarbeitet; doppelte Twitch-Zustellungen
 zahlen nicht erneut aus. Offene Spiele überstehen Neustarts. Ergebnisse werden
-24 Stunden aufbewahrt, der ursprüngliche Chat-Text wird nach der Verarbeitung
-und Zustellung entfernt. Weitergeleitete Shared-Chat-Nachrichten lösen keine
+24 Stunden aufbewahrt, der ursprüngliche Chat-Text wird nach erfolgreicher oder
+endgültig fehlgeschlagener Zustellung entfernt. Für noch ausstehende Wiederholungen
+bleibt er verfügbar. Weitergeleitete Shared-Chat-Nachrichten lösen keine
 Commands oder Moderation in fremden Channels aus.
 
 Antworten werden konservativ auf etwa 20 Nachrichten pro 30 Sekunden begrenzt,
-AutoMod hat einen eigenen Zustellungs-Worker. Temporäre API-Fehler werden begrenzt
-wiederholt; bei unklarem Netzwerk-Timeout wird eine Chat-Antwort nicht erneut
+AutoMod hat einen eigenen Zustellungs-Worker. Versandbereite Channels kommen
+abwechselnd zum Zug; Command-Antworten haben Vorrang vor automatischen Nachrichten.
+Temporäre API-Fehler werden begrenzt
+wiederholt; bei HTTP 429 berücksichtigt der Zustellungs-Worker Twitchs
+`Ratelimit-Reset` statt schon nach fünf Sekunden erneut zu senden.
+Wiederholungszeitpunkte und die globale Sendepause werden in SQLite gespeichert.
+Eine fehlerhafte Nachricht blockiert während ihrer Wartezeit keine anderen
+Channels. Twitchs gemeinsames Chat-Limit pausiert weiterhin alle Chat-Sendungen;
+ein Moderationslimit gilt für den betroffenen Broadcaster.
+Bei unklarem Netzwerk-Timeout wird eine Chat-Antwort nicht erneut
 gesendet. Eine gebuchte Spielauszahlung wird dadurch nicht erneut ausgeführt.
 Über zwei Minuten alte Nachrichten/Aktionen werden nicht nachträglich ausgeführt.
 Bereits verbuchte Spiele bleiben auch bei einer fehlgeschlagenen Chat-Antwort
 verbucht; `!coins` zeigt den aktuellen Stand. Bei sehr großen Channels kann
 deshalb ein höherer Command-Cooldown sinnvoll sein.
+
+Bei zehn ausstehenden Antworten in einem Channel oder 50 insgesamt werden neue
+Commands vor ihrer Ausführung übersprungen und Timer vorerst nicht eingeplant.
+Solche übersprungenen Commands buchen keine Coins und verbrauchen kein Daily.
+Im Chat wird dafür keine weitere Meldung erzeugt, die die Warteschlange zusätzlich
+füllen würde. Bereits angenommene Commands können bei einem späteren Ausfall
+trotzdem ohne zugestellte Antwort bleiben; ihre gespeicherten Ergebnisse werden
+nicht erneut ausgeführt.
+
+**Verbindung & Versand** im Dashboard zeigt getrennt den Empfangsstatus, letzte
+empfangene Chatnachricht, letzten erfolgreichen Versand, letzte ausgeführte
+Moderation, letzte Live-Prüfung, wartende Nachrichten und deren Alter. Fehler,
+abgelaufene Aufträge und wegen Auslastung übersprungene Commands werden für die
+letzten 24 Stunden gezählt. Ein fehlender Zeitstempel bedeutet „noch nicht
+bestätigt“, nicht automatisch eine kaputte Verbindung. Live-Prüfungen erfolgen
+bei fälligen Live-Timern. AutoMod-Protokolle unterscheiden auch abgelaufene und
+abgebrochene Aktionen. „Bot pausieren“ verwirft alle wartenden Aufträge und bleibt
+auch mit einem unvollständigen Command-Entwurf bedienbar; der Entwurf bleibt im
+Formular erhalten.
+
+Die Datenbank wird beim Start automatisch erweitert; vorhandene Einstellungen,
+Guthaben und wartende Nachrichten bleiben erhalten. Der Versand ist für einen
+aktiven Botprozess ausgelegt.
 
 Access-/Refresh-Tokens liegen verschlüsselt in SQLite und werden nicht an den
 Browser ausgeliefert. Twitch-Tokens werden beim Start und mindestens stündlich

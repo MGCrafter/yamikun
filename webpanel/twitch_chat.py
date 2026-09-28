@@ -16,6 +16,7 @@ import aiohttp
 from aiohttp import web
 
 from twitch_chat.commands import COMMANDS, normalize_text
+from twitch_chat.custom import BUILTIN_NAMES, validate_commands
 from twitch_chat.service import OAUTH, SCOPES, Service, TwitchError
 from twitch_chat.store import DEFAULTS
 
@@ -33,6 +34,8 @@ def settings(data: dict) -> dict:
     # Older browser tabs may omit the new field; save() preserves existing timers.
     if isinstance(data, dict) and "auto_messages" not in data:
         data = {**data, "auto_messages": []}
+    if isinstance(data, dict) and "custom_commands" not in data:
+        data = {**data, "custom_commands": []}
     if not isinstance(data, dict) or set(data) != set(DEFAULTS):
         raise ValueError("settings")
     for key in ("social_enabled", "gambling_enabled", "automod_enabled", "block_links", "block_caps", "block_spam"):
@@ -70,7 +73,8 @@ def settings(data: dict) -> dict:
             if any(ord(c) < 32 or ord(c) == 127 for c in value):
                 raise ValueError("auto_messages")
         cleaned.append({**message, "name": message["name"].strip(), "text": message["text"].strip()})
-    return {**data, "blocked_words": list(dict.fromkeys(w.strip() for w in words)), "auto_messages": cleaned}
+    return {**data, "blocked_words": list(dict.fromkeys(w.strip() for w in words)), "auto_messages": cleaned,
+            "custom_commands": validate_commands(data["custom_commands"])}
 
 
 class TwitchChatPanel:
@@ -151,6 +155,7 @@ class TwitchChatPanel:
         result = {"authenticated": False, "configured": not self.service.missing,
                   "bot_ready": bool(bot), "bot_login": bot["login"] if bot else None,
                   "can_setup_bot": False,
+                  "reserved_command_names": sorted(BUILTIN_NAMES),
                   "commands": [{"usage": u, "description": d} for u, d in COMMANDS]}
         try:
             sess = self.session(request)
@@ -175,8 +180,9 @@ class TwitchChatPanel:
             if not isinstance(data, dict) or set(data) != {"enabled", "settings"} or type(data["enabled"]) is not bool:
                 raise ValueError("fields")
             raw_settings = data["settings"]
-            if isinstance(raw_settings, dict) and "auto_messages" not in raw_settings:
-                raw_settings = {**raw_settings, "auto_messages": self.store.channel(sess["user_id"])["settings"]["auto_messages"]}
+            if isinstance(raw_settings, dict):
+                current = self.store.channel(sess["user_id"])["settings"]
+                raw_settings = {**raw_settings, **{key: current[key] for key in ("auto_messages", "custom_commands") if key not in raw_settings}}
             cfg = settings(raw_settings)
         except (ValueError, TypeError):
             return error(400, "invalid_settings")

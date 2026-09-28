@@ -22,7 +22,6 @@ logger = logging.getLogger("oaken-tower-bot")
 
 TWITCH_OAUTH_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_STREAMS_URL = "https://api.twitch.tv/helix/streams"
-TWITCH_USERS_URL = "https://api.twitch.tv/helix/users"
 DEFAULT_TWITCH_MESSAGE = "{streamer} ist jetzt live auf Twitch!\n{title}\n{url}"
 TWITCH_PLACEHOLDERS = ("{streamer}", "{title}", "{game}", "{url}")
 
@@ -51,7 +50,7 @@ def normalize_login(value: str) -> str | None:
         return None
     # Nur der erste Pfadabschnitt ist der Kanalname (z. B. /videos, /about).
     raw = raw.split("?")[0].split("#")[0].strip("/").split("/")[0]
-    if not raw or len(raw) > 25 or not all(ch.isalnum() or ch == "_" for ch in raw):
+    if not raw or len(raw) > 25 or not raw.isascii() or not all(ch.isalnum() or ch == "_" for ch in raw):
         return None
     return raw
 
@@ -102,11 +101,29 @@ class TwitchCog(commands.Cog):
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
             logger.exception("Twitch: OAuth-Token konnte nicht geladen werden.")
             return
-        for cfg in configs:
+        # Fetch each Twitch login only once, even when several guilds follow it.
+        logins = list(dict.fromkeys(cfg["login"] for cfg in configs))
+        for start in range(0, len(logins), 100):
+            batch = logins[start:start + 100]
             try:
-                await self._check_config(cfg, token)
+                streams = await self._helix_get(TWITCH_STREAMS_URL, token, params=[
+                    ("first", "100"), *[("user_login", login) for login in batch],
+                ])
             except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
-                logger.exception("Twitch: Prüfung für Guild %s fehlgeschlagen.", cfg["guild_id"])
+                logger.exception("Twitch: Live-Abfrage fehlgeschlagen.")
+                continue
+            by_login = {stream["user_login"].lower(): stream for stream in streams}
+            for cfg in configs:
+                if cfg["login"] not in batch:
+                    continue
+                # Settings may have changed while the Twitch request was pending.
+                current = self.db.get_twitch_config(cfg["guild_id"])
+                if not current["enabled"] or current["login"] != cfg["login"]:
+                    continue
+                try:
+                    await self._check_config({**current, "guild_id": cfg["guild_id"]}, by_login.get(cfg["login"]))
+                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError):
+                    logger.exception("Twitch: Prüfung für Guild %s fehlgeschlagen.", cfg["guild_id"])
 
     @poll_streams.before_loop
     async def _before_poll(self) -> None:
@@ -132,26 +149,35 @@ class TwitchCog(commands.Cog):
         self._token_expires_at = time.time() + int(data.get("expires_in") or 0)
         return token
 
-    async def _helix_get(self, url: str, token: str, **params: str) -> list[dict[str, Any]]:
+    async def _helix_get(self, url: str, token: str, *, params: list[tuple[str, str]]) -> list[dict[str, Any]]:
         if self._session is None:
             raise RuntimeError("Twitch HTTP session is not ready")
-        headers = {
-            "Client-Id": os.environ["TWITCH_CLIENT_ID"],
-            "Authorization": f"Bearer {token}",
-        }
-        async with self._session.get(url, headers=headers, params=params) as response:
-            response.raise_for_status()
-            result = await response.json()
-        return list(result.get("data") or [])
+        for attempt in range(2):
+            headers = {
+                "Client-Id": os.environ["TWITCH_CLIENT_ID"],
+                "Authorization": f"Bearer {self._access_token or token}",
+            }
+            async with self._session.get(url, headers=headers, params=params) as response:
+                if response.status == 401 and not attempt:
+                    self._access_token = None
+                    self._token_expires_at = 0
+                else:
+                    response.raise_for_status()
+                    result = await response.json()
+                    rows = result.get("data") if isinstance(result, dict) else None
+                    if not isinstance(rows, list) or any(
+                        not isinstance(row, dict) or not isinstance(row.get("user_login"), str) for row in rows
+                    ):
+                        raise RuntimeError("Twitch streams response is invalid")
+                    return rows
+            token = await self._get_token()
+        raise RuntimeError("Twitch authentication failed")
 
-    async def _check_config(self, cfg: dict[str, Any], token: str) -> None:
-        login = cfg["login"]
-        streams = await self._helix_get(TWITCH_STREAMS_URL, token, user_login=login)
-        if not streams:
-            if cfg["last_stream_id"]:
-                self.db.set_twitch_last_stream_id(cfg["guild_id"], None)
+    async def _check_config(self, cfg: dict[str, Any], stream: dict[str, Any] | None) -> None:
+        if not stream:
+            # Keep the last delivered ID across offline gaps and restarts.
+            # A genuinely new stream has a new ID; an empty response isn't a reset.
             return
-        stream = streams[0]
         stream_id = str(stream.get("id") or "")
         if not stream_id or stream_id == cfg["last_stream_id"]:
             return
@@ -176,15 +202,14 @@ class TwitchCog(commands.Cog):
             return False
         login = cfg["login"]
         url = f"https://twitch.tv/{login}"
-        title = str(stream.get("title") or "Live auf Twitch")
         game = str(stream.get("game_name") or "Twitch")
         embed = discord.Embed(
-            title=f"🔴 {stream.get('user_name') or login} ist live!",
+            title=f"🔴 {stream.get('user_name') or login} ist live!"[:256],
             url=url,
-            description=render_twitch(cfg["message"], stream, login),
+            description=render_twitch(cfg["message"], stream, login)[:4096],
             color=0x9146FF,
         )
-        embed.add_field(name="Kategorie", value=game, inline=True)
+        embed.add_field(name="Kategorie", value=game[:1024], inline=True)
         thumbnail = str(stream.get("thumbnail_url") or "").replace("{width}", "1280").replace("{height}", "720")
         if thumbnail:
             embed.set_image(url=thumbnail)

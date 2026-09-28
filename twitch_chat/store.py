@@ -17,8 +17,11 @@ DEFAULTS = {
     "automod_enabled": False, "block_links": False, "block_caps": False,
     "block_spam": True, "blocked_words": [], "timeout_seconds": 60,
     "command_cooldown": 5, "max_bet": 10000, "daily_coins": 500,
-    "auto_messages": [],
+    "auto_messages": [], "custom_commands": [],
 }
+
+MAX_CHANNEL_REPLIES = 10
+MAX_TOTAL_REPLIES = 50
 
 
 class Store:
@@ -48,6 +51,7 @@ class Store:
                 result TEXT, delivered INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS twitch_chat_pending ON twitch_chat_events(delivered, created);
+            CREATE INDEX IF NOT EXISTS twitch_chat_channel_events ON twitch_chat_events(channel_id, created);
             CREATE TABLE IF NOT EXISTS twitch_chat_wallets (
                 channel_id TEXT NOT NULL, user_id TEXT NOT NULL, login TEXT NOT NULL,
                 coins INTEGER NOT NULL DEFAULT 0 CHECK(coins >= 0),
@@ -93,7 +97,26 @@ class Store:
             CREATE TABLE IF NOT EXISTS twitch_chat_timer_sends (
                 channel_id TEXT PRIMARY KEY, last_sent REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS twitch_chat_command_cooldowns (
+                channel_id TEXT NOT NULL, command_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                until REAL NOT NULL, PRIMARY KEY(channel_id,command_id,user_id)
+            );
+            CREATE TABLE IF NOT EXISTS twitch_chat_activity (
+                channel_id TEXT PRIMARY KEY, last_received REAL, last_sent REAL,
+                last_moderated REAL, last_live_check REAL, live INTEGER, live_error TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS twitch_chat_dispatch (
+                channel_id TEXT NOT NULL, action TEXT NOT NULL,
+                last_attempt REAL NOT NULL DEFAULT 0, next_allowed REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(channel_id,action)
+            );
         """)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(twitch_chat_events)")}
+        with conn:
+            if "next_attempt" not in columns:
+                conn.execute("ALTER TABLE twitch_chat_events ADD COLUMN next_attempt REAL NOT NULL DEFAULT 0")
+            if "outcome" not in columns:
+                conn.execute("ALTER TABLE twitch_chat_events ADD COLUMN outcome TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def digest(token: str) -> str:
@@ -132,12 +155,20 @@ class Store:
         old = {m["id"]: m for m in previous["settings"]["auto_messages"]} if previous else {}
         new = {m["id"]: m for m in settings.get("auto_messages", [])}
         with self.conn:
+            old_commands = {c["id"]: c for c in previous["settings"]["custom_commands"]} if previous else {}
+            new_commands = {c["id"]: c for c in settings.get("custom_commands", [])}
+            for command_id in old_commands.keys() | new_commands.keys():
+                if old_commands.get(command_id) != new_commands.get(command_id):
+                    self.conn.execute("DELETE FROM twitch_chat_command_cooldowns WHERE channel_id=? AND command_id=?", (uid, command_id))
+                    # Edits/removal must also cancel replies waiting for delivery.
+                    self.conn.execute("""UPDATE twitch_chat_events SET delivered=1,payload='{}',outcome='cancelled'
+                        WHERE channel_id=? AND delivered=0 AND json_extract(result,'$.custom_command_id')=?""", (uid, command_id))
             for mid in old.keys() | new.keys():
                 changed = old.get(mid) != new.get(mid) or not previous or previous["enabled"] != enabled
                 if not changed:
                     continue
                 # Cancel queued copies as well as resetting the timer on edits/pause.
-                self.conn.execute("UPDATE twitch_chat_events SET delivered=1,payload='{}' WHERE id GLOB ? AND delivered=0",
+                self.conn.execute("UPDATE twitch_chat_events SET delivered=1,payload='{}',outcome='cancelled' WHERE id GLOB ? AND delivered=0",
                                   (f"auto:{uid}:{mid}:*",))
                 self.conn.execute("DELETE FROM twitch_chat_timers WHERE channel_id=? AND message_id=?", (uid, mid))
                 message = new.get(mid)
@@ -148,6 +179,10 @@ class Store:
                               (enabled, json.dumps(settings), "connecting" if enabled else "disabled", uid))
             if not enabled:
                 self.conn.execute("DELETE FROM twitch_chat_delivery_errors WHERE channel_id=?", (uid,))
+                self.conn.execute("""UPDATE twitch_chat_modlog SET outcome='cancelled' WHERE id IN
+                    (SELECT json_extract(result,'$.moderate.log_id') FROM twitch_chat_events WHERE channel_id=? AND delivered=0)""", (uid,))
+                self.conn.execute("""UPDATE twitch_chat_events SET delivered=1,processed=1,payload='{}',outcome='cancelled'
+                    WHERE channel_id=? AND delivered=0""", (uid,))
 
     def timer_activity(self, uid: str):
         # Called inside the event-processing transaction, after deduplication/AutoMod.
@@ -208,14 +243,67 @@ class Store:
         # A shared chat can produce more than one delivery ID for a message.
         key = event["broadcaster_user_id"] + ":" + event["message_id"]
         with self.conn:
-            self.conn.execute("INSERT OR IGNORE INTO twitch_chat_events(id,channel_id,payload,created) VALUES(?,?,?,?)",
+            inserted = self.conn.execute("INSERT OR IGNORE INTO twitch_chat_events(id,channel_id,payload,created) VALUES(?,?,?,?)",
                               (key, event["broadcaster_user_id"], json.dumps(event), now))
+            if inserted.rowcount:
+                self.conn.execute("""INSERT INTO twitch_chat_activity(channel_id,last_received) VALUES(?,?)
+                    ON CONFLICT(channel_id) DO UPDATE SET last_received=excluded.last_received""", (event["broadcaster_user_id"], now))
+
+    def reply_capacity(self, uid: str, now: float) -> bool:
+        row = self.conn.execute("""SELECT COUNT(*),COALESCE(SUM(channel_id=?),0) FROM twitch_chat_events
+            WHERE processed=1 AND delivered=0 AND created>? AND json_extract(result,'$.reply') IS NOT NULL""",
+            (uid, now - 120)).fetchone()
+        return row[0] < MAX_TOTAL_REPLIES and row[1] < MAX_CHANNEL_REPLIES
+
+    def next_delivery(self, moderation: bool, now: float):
+        action = "moderation" if moderation else "send"
+        return self.conn.execute("""SELECT e.* FROM twitch_chat_events e
+            LEFT JOIN twitch_chat_dispatch d ON d.channel_id=e.channel_id AND d.action=?
+            WHERE e.processed=1 AND e.delivered=0 AND e.next_attempt<=?
+            AND (json_extract(e.result,'$.moderate') IS NOT NULL)=?
+            AND COALESCE(d.next_allowed,0)<=?
+            AND COALESCE((SELECT next_allowed FROM twitch_chat_dispatch WHERE channel_id='*' AND action=?),0)<=?
+            ORDER BY (e.id LIKE 'auto:%'),COALESCE(d.last_attempt,0),e.created,e.id LIMIT 1""",
+            (action, now, int(moderation), now, action, now)).fetchone()
+
+    def dispatch_attempt(self, uid: str, moderation: bool, now: float):
+        action = "moderation" if moderation else "send"
+        with self.conn:
+            self.conn.execute("""INSERT INTO twitch_chat_dispatch(channel_id,action,last_attempt) VALUES(?,?,?)
+                ON CONFLICT(channel_id,action) DO UPDATE SET last_attempt=excluded.last_attempt""", (uid, action, now))
+            if not moderation:
+                self.defer_dispatch("*", action, now + 1.6)
+
+    def defer_dispatch(self, uid: str, action: str, until: float):
+        # Also used inside delivery's transaction; no nested commit.
+        self.conn.execute("""INSERT INTO twitch_chat_dispatch(channel_id,action,next_allowed) VALUES(?,?,?)
+            ON CONFLICT(channel_id,action) DO UPDATE SET next_allowed=MAX(next_allowed,excluded.next_allowed)""", (uid, action, until))
+
+    def finish(self, event_id: str, outcome: str):
+        with self.conn:
+            row = self.conn.execute("SELECT channel_id,result,delivered FROM twitch_chat_events WHERE id=?", (event_id,)).fetchone()
+            if not row or row["delivered"]:
+                return
+            result = json.loads(row["result"] or "{}")
+            self.conn.execute("UPDATE twitch_chat_events SET processed=1,delivered=1,payload='{}',outcome=? WHERE id=?", (outcome, event_id))
+            if result.get("moderate"):
+                self.conn.execute("UPDATE twitch_chat_modlog SET outcome=? WHERE id=?",
+                                  ("ok" if outcome == "sent" else outcome, result["moderate"]["log_id"]))
+            if outcome == "sent":
+                field = "last_moderated" if "moderate" in result else "last_sent"
+                self.conn.execute(f"""INSERT INTO twitch_chat_activity(channel_id,{field}) VALUES(?,?)
+                    ON CONFLICT(channel_id) DO UPDATE SET {field}=excluded.{field}""", (row["channel_id"], time.time()))
+
+    def expire_deliveries(self, now: float):
+        for row in self.conn.execute("SELECT id FROM twitch_chat_events WHERE delivered=0 AND created<=?", (now - 120,)).fetchall():
+            self.finish(row[0], "expired")
 
     def cleanup(self):
         now = time.time()
         with self.conn:
             self.conn.execute("DELETE FROM twitch_chat_sessions WHERE expires<?", (now,))
             self.conn.execute("DELETE FROM twitch_chat_oauth WHERE expires<?", (now,))
+            self.conn.execute("DELETE FROM twitch_chat_command_cooldowns WHERE until<?", (now,))
             self.conn.execute("DELETE FROM twitch_chat_events WHERE created<? AND delivered=1", (now - 86400,))
             self.conn.execute("DELETE FROM twitch_chat_modlog WHERE created<?", (now - 30 * 86400,))
 
@@ -223,6 +311,7 @@ class Store:
         channel = self.channel(uid)
         if channel:
             channel["connection_error"] = channel["error"]
+            channel["connection_status"] = channel["status"]
         if channel and channel["enabled"]:
             errors = [r[0] for r in self.conn.execute("SELECT error FROM twitch_chat_delivery_errors WHERE channel_id=? ORDER BY action", (uid,))]
             if errors:
@@ -234,4 +323,16 @@ class Store:
             LEFT JOIN levels d ON d.guild_id=0 AND d.user_id=l.discord_id
             WHERE channel_id=? ORDER BY coins DESC LIMIT 10""", (uid,)).fetchall()
         logs = self.conn.execute("SELECT login,reason,action,created,outcome FROM twitch_chat_modlog WHERE channel_id=? ORDER BY id DESC LIMIT 15", (uid,)).fetchall()
-        return {"channel": channel, "leaderboard": [dict(r) for r in leaders], "moderation_log": [dict(r) for r in logs]}
+        activity = self.conn.execute("SELECT * FROM twitch_chat_activity WHERE channel_id=?", (uid,)).fetchone()
+        queue = self.conn.execute("""SELECT COUNT(*) AS pending,MIN(created) AS oldest,
+            COALESCE(SUM(id LIKE 'auto:%'),0) AS timers FROM twitch_chat_events WHERE channel_id=? AND delivered=0""", (uid,)).fetchone()
+        outcomes = {r[0]: r[1] for r in self.conn.execute("""SELECT outcome,COUNT(*) FROM twitch_chat_events
+            WHERE channel_id=? AND created>? GROUP BY outcome""", (uid, time.time() - 86400))}
+        errors = {r[0]: r[1] for r in self.conn.execute("SELECT action,error FROM twitch_chat_delivery_errors WHERE channel_id=?", (uid,))}
+        diagnostics = {**(dict(activity) if activity else {}), "pending": queue["pending"], "pending_timers": queue["timers"],
+                       "oldest_age": max(0, time.time() - queue["oldest"]) if queue["oldest"] else 0,
+                       "failed_24h": outcomes.get("failed", 0), "expired_24h": outcomes.get("expired", 0),
+                       "overloaded_24h": outcomes.get("overloaded", 0), "send_error": errors.get("send", ""),
+                       "moderation_error": errors.get("moderation", "")}
+        return {"channel": channel, "leaderboard": [dict(r) for r in leaders], "moderation_log": [dict(r) for r in logs],
+                "diagnostics": diagnostics}

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -26,9 +27,10 @@ SCOPES = {
 
 
 class TwitchError(RuntimeError):
-    def __init__(self, code: str, status: int = 502, *, reason: str = ""):
+    def __init__(self, code: str, status: int = 502, *, reason: str = "", retry_after: float = 0):
         super().__init__(code)
         self.code, self.status = code, status
+        self.retry_after = retry_after
         # Only machine-readable reasons; never retain upstream messages or tokens.
         self.reason = reason if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason) else ""
 
@@ -91,7 +93,6 @@ class Service:
         self._account_lock = asyncio.Lock()
         self._validated: dict[tuple[str, str], float] = {}
         self.wakeup = asyncio.Event()
-        self._send_at = 0.0
         self._live: dict[str, tuple[float, bool]] = {}
 
     @property
@@ -130,6 +131,14 @@ class Service:
             raise TwitchError("not_configured", 503)
         async with self.http.request(method, url, **kwargs) as response:
             if response.status >= 400:
+                retry_after = 0.0
+                if response.status == 429:
+                    try:
+                        reset = float(response.headers.get("Ratelimit-Reset", ""))
+                        if math.isfinite(reset):
+                            retry_after = max(0, reset - time.time())
+                    except ValueError:
+                        pass
                 # Classify known permission errors without logging the response body.
                 reason = ""
                 try:
@@ -142,7 +151,7 @@ class Service:
                             reason = "channel_authorization_missing"
                 except (ValueError, aiohttp.ClientError, asyncio.TimeoutError):
                     pass
-                raise TwitchError(f"twitch_{response.status}", response.status, reason=reason)
+                raise TwitchError(f"twitch_{response.status}", response.status, reason=reason, retry_after=retry_after)
             if response.status == 204:
                 return {}
             return await response.json()
@@ -304,8 +313,7 @@ class Service:
                 except Exception:
                     logger.exception("Twitch-Chat: Nachricht konnte nicht verarbeitet werden.")
                     # A broken event must not block the queue or mutate balances repeatedly.
-                    with self.store.conn:
-                        self.store.conn.execute("UPDATE twitch_chat_events SET processed=1,delivered=1,payload='{}' WHERE id=?", (row["id"],))
+                    self.store.finish(row["id"], "failed")
             await asyncio.sleep(.2)
 
     async def refresh_live(self, ids: set[str]):
@@ -321,13 +329,30 @@ class Service:
             live = {row["user_id"] for row in rows}
             for uid in batch:
                 self._live[uid] = (time.monotonic() + 60, uid in live)
+            with self.store.conn:
+                for uid in batch:
+                    self.store.conn.execute("""INSERT INTO twitch_chat_activity(channel_id,last_live_check,live) VALUES(?,?,?)
+                        ON CONFLICT(channel_id) DO UPDATE SET last_live_check=excluded.last_live_check,live=excluded.live,live_error=''""",
+                        (uid, time.time(), uid in live))
 
     async def schedule_auto_messages(self, now: float | None = None):
         if not self.store.account(self.bot_id, "bot"):
             return
         now = time.time() if now is None else now
         due = self.store.due_messages(now)
-        await self.refresh_live({uid for uid, message in due if message["live_only"]})
+        live_ids = {uid for uid, message in due if message["live_only"]}
+        try:
+            await self.refresh_live(live_ids)
+        except (TwitchError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # Offline-capable timers do not depend on the Streams API.
+            with self.store.conn:
+                for uid in live_ids:
+                    if self._live.get(uid, (0, False))[0] <= time.monotonic():
+                        self.store.conn.execute("""INSERT INTO twitch_chat_activity(channel_id,live_error) VALUES(?,?)
+                            ON CONFLICT(channel_id) DO UPDATE SET live_error=excluded.live_error""",
+                            (uid, "Livestatus konnte nicht geprüft werden; Live-Timer warten."))
+            logger.warning("Twitch-Chat: Livestatus für Timer nicht verfügbar (%s).",
+                           exc.diagnostic if isinstance(exc, TwitchError) else type(exc).__name__)
         queued = set()
         # Re-read after the API await: settings or the bot's authorization may change.
         if not self.store.account(self.bot_id, "bot"):
@@ -337,6 +362,8 @@ class Service:
                 continue
             checked_until, live = self._live.get(uid, (0, False))
             if message["live_only"] and (not live or checked_until <= time.monotonic()):
+                continue
+            if not self.store.reply_capacity(uid, now):
                 continue
             if self.store.conn.execute("SELECT COUNT(*) FROM twitch_chat_events WHERE delivered=0").fetchone()[0] >= 5000:
                 break
@@ -357,8 +384,8 @@ class Service:
     async def deliver(self, moderation: bool):
         action = "moderation" if moderation else "send"
         while True:
-            row = self.store.conn.execute("""SELECT * FROM twitch_chat_events WHERE processed=1 AND delivered=0
-                AND (instr(COALESCE(result,''),'\"moderate\":')>0)=? ORDER BY created LIMIT 1""", (int(moderation),)).fetchone()
+            self.store.expire_deliveries(time.time())
+            row = self.store.next_delivery(moderation, time.time())
             if not row:
                 await asyncio.sleep(.2)
                 continue
@@ -366,15 +393,14 @@ class Service:
             channel = self.store.channel(cid)
             result = json.loads(row["result"] or "{}")
             if not result or not channel or not channel["enabled"] or time.time() - row["created"] > 120:
-                self.finish(row["id"])
+                self.store.finish(row["id"], "expired" if time.time() - row["created"] >= 120 else "cancelled")
                 continue
-            if not moderation:
-                await asyncio.sleep(max(0, self._send_at - time.monotonic()))
-                self._send_at = time.monotonic() + 1.6
-            # Pause/removal can happen while awaiting the throttle.
+            await asyncio.sleep(0)
+            # Pause/removal can happen after selection or during a live-status request.
             if not self.store.channel(cid)["enabled"]:
-                self.finish(row["id"])
+                self.store.finish(row["id"], "cancelled")
                 continue
+            attempted_delivery = False
             try:
                 automatic = result.get("auto_message")
                 if automatic:
@@ -384,14 +410,19 @@ class Service:
                             or not self.store.account(self.bot_id, "bot") or not self.store.account(cid)
                             or not self.store.auto_message_can_send(cid, time.time())
                             or (automatic["live_only"] and not self._live[cid][1])):
-                        self.finish(row["id"])
+                        self.store.finish(row["id"], "cancelled")
                         continue
                 # Timer edits cancel pending copies, including one already waiting here.
                 current = self.store.conn.execute("SELECT delivered FROM twitch_chat_events WHERE id=?", (row["id"],)).fetchone()
                 if not current or current[0] or time.time() - row["created"] > 120:
-                    self.finish(row["id"])
+                    self.store.finish(row["id"], "expired")
+                    continue
+                if not self.store.channel(cid)["enabled"]:
+                    self.store.finish(row["id"], "cancelled")
                     continue
                 event = json.loads(row["payload"])
+                self.store.dispatch_attempt(cid, moderation, time.time())
+                attempted_delivery = True
                 if moderation:
                     mod = result["moderate"]
                     params = {"broadcaster_id": cid, "moderator_id": cid}
@@ -415,25 +446,24 @@ class Service:
                     if automatic:
                         self.store.auto_message_sent(cid, time.time())
                 self.store.delivery_status(cid, action)
-                self.finish(row["id"])
+                self.store.finish(row["id"], "sent")
             except (TwitchError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 retry = isinstance(exc, TwitchError) and (exc.status == 429 or exc.status >= 500) and row["attempts"] < 2
                 # Network timeouts are ambiguous: do not send the same payout message
                 # again. Its committed result remains in SQLite for diagnosis.
                 with self.store.conn:
-                    self.store.conn.execute("UPDATE twitch_chat_events SET attempts=attempts+1,delivered=? WHERE id=?", (0 if retry else 1, row["id"]))
+                    retry_at = time.time() + max(5, exc.retry_after if isinstance(exc, TwitchError) else 0)
+                    self.store.conn.execute("UPDATE twitch_chat_events SET attempts=attempts+1,next_attempt=? WHERE id=?", (retry_at, row["id"]))
+                    if isinstance(exc, TwitchError) and exc.status == 429 and attempted_delivery:
+                        # Chat sends share a bot-wide bucket; moderation uses the broadcaster's token.
+                        self.store.defer_dispatch(cid if moderation else "*", action, retry_at)
                     if moderation:
                         self.store.conn.execute("UPDATE twitch_chat_modlog SET outcome=? WHERE id=?", ("retry" if retry else "failed", result["moderate"]["log_id"]))
+                if not retry:
+                    self.store.finish(row["id"], "failed")
                 self.store.delivery_status(cid, action, delivery_error(exc, moderation))
                 logger.warning("Twitch-Chat: Zustellung fehlgeschlagen (channel=%s, action=%s, %s).", cid, action,
                                exc.diagnostic if isinstance(exc, TwitchError) else type(exc).__name__)
-                if retry:
-                    await asyncio.sleep(5)
             except Exception:
                 logger.exception("Twitch-Chat: Unerwarteter Zustellungsfehler.")
-                self.finish(row["id"])
-
-    def finish(self, event_id):
-        with self.store.conn:
-            # Keep only the deduplication key and result for 24 h, not chat text.
-            self.store.conn.execute("UPDATE twitch_chat_events SET delivered=1,payload='{}' WHERE id=?", (event_id,))
+                self.store.finish(row["id"], "failed")
