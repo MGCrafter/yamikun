@@ -60,6 +60,60 @@ def test_daily_deduplicates_across_restart_and_channels_are_isolated(store):
     assert engine.balance("200", "10") == 500
 
 
+def test_chat_automatically_claims_daily_once_and_at_cooldown_boundary(store):
+    engine = Engine(store, "999")
+    store.configure("100", True, {**DEFAULTS, "daily_coins": 750})
+    assert run(engine, "Hallo!") == {}
+    assert engine.balance("100", "10") == 750
+    assert run(Engine(store, "999"), "Hallo!") == {}
+    assert run(engine, "Noch da", now=1000 + 86400 - 1, message_id="early") == {}
+    assert engine.balance("100", "10") == 750
+    assert run(engine, "Neuer Tag", now=1000 + 86400, message_id="next-day") == {}
+    assert engine.balance("100", "10") == 1500
+    assert run(engine, "Hallo", cid="200", message_id="other-channel") == {}
+    assert engine.balance("200", "10") == 500
+
+
+def test_automatic_daily_shares_discord_cooldown_and_streak(store):
+    engine = Engine(store, "999")
+    with store.conn:
+        store.conn.execute("INSERT INTO twitch_chat_links VALUES('10',123,'Luna')")
+        store.conn.execute("INSERT INTO daily VALUES(0,123,1000,6)")
+    run(engine, "Hallo", now=1001)
+    assert engine.balance("100", "10") == 0
+    run(engine, "Hallo", now=87400, message_id="next-day")
+    from cogs.economy import DAILY_PER_STREAK, DAILY_CAP, WEEK_BONUS
+    reward = min(7 * DAILY_PER_STREAK, DAILY_CAP) + WEEK_BONUS
+    assert engine.balance("100", "10") == reward
+    run(engine, "Hallo", cid="200", now=87401, message_id="other-channel")
+    assert engine.balance("200", "10") == reward
+    assert store.conn.execute("SELECT last_claim,streak FROM daily WHERE user_id=123").fetchone()[:] == (87400, 7)
+
+
+@pytest.mark.parametrize("kind", ["bot", "disabled", "moderated", "expired"])
+def test_automatic_daily_ignores_ineligible_messages(store, kind):
+    engine = Engine(store, "999")
+    uid = "999" if kind == "bot" else "10"
+    store.configure("100", kind != "disabled", {**DEFAULTS, "automod_enabled": True, "blocked_words": ["blocked"]})
+    evt = event("blocked" if kind == "moderated" else "Hallo", uid=uid)
+    store.enqueue(evt, 1000)
+    row = store.conn.execute("SELECT * FROM twitch_chat_events").fetchone()
+    engine.process(dict(row), 1120 if kind == "expired" else 1000)
+    assert engine.balance("100", uid) == 0
+
+
+def test_automatic_daily_precedes_commands_and_survives_command_errors(store):
+    engine = Engine(store, "999")
+    assert "500 Coins" in run(engine, "!coins")["reply"]
+    assert run(engine, "!slots invalid", uid="20", message_id="invalid")["reply"]
+    assert engine.balance("100", "20") == 500
+    # Claiming automatically must also work while commands are on cooldown.
+    with store.conn:
+        store.conn.execute("UPDATE twitch_chat_wallets SET command_at=87400 WHERE user_id='10'")
+    assert run(engine, "!coins", now=87400, message_id="cooldown") == {}
+    assert engine.balance("100", "10") == 1000
+
+
 @pytest.mark.parametrize("text", ["!coinflip -5 kopf", "!coinflip 10001 kopf", "!coinflip 20 invalid", "!roulette 50 99", "!roulette 50 rot extra", "!slots 50 extra", "!coinflip 2.5 kopf", "!slots 999999999999999999", "!roulette 25 zahl -1"])
 def test_bad_bets_rollback_without_spending(store, text):
     engine = Engine(store, "999")
@@ -94,6 +148,66 @@ def test_economy_link_uses_discord_daily_and_never_moves_channel_coins(store):
     with store.conn:
         store.conn.execute("DELETE FROM twitch_chat_links WHERE twitch_id='10'")
     assert engine.balance("100", "10") == 500
+
+
+def test_chat_link_uses_discord_balance_across_channels_and_restart(store):
+    engine = Engine(store, "999")
+    code = store.create_link_code(123, "Luna", "luna", 1000)
+    with store.conn:
+        store.conn.execute("INSERT INTO levels(guild_id,user_id,coins) VALUES(0,123,4321)")
+        store.conn.execute("INSERT INTO daily VALUES(0,123,1000,3)")
+    response = run(engine, f"!link {code}", now=1001)
+    assert "4321 Coins (Discord & Twitch)" in response["reply"]
+    assert not store.conn.execute("SELECT 1 FROM twitch_chat_link_codes").fetchone()
+    assert engine.balance("200", "10") == 4321
+    assert run(Engine(store, "999"), f"!link {code}", now=1002) == response
+    assert "4321 Coins" in run(engine, "!coins", now=1010, message_id="coins")["reply"]
+    assert "Mit Discord verbunden" in run(engine, "!link", now=1020, message_id="status")["reply"]
+    assert store.conn.execute("SELECT coins FROM twitch_chat_wallets WHERE user_id='10'").fetchone()[0] == 500
+    assert store.conn.execute("SELECT last_claim FROM daily WHERE user_id=123").fetchone()[0] == 1000
+
+
+@pytest.mark.parametrize("case", ["wrong_user", "expired", "replaced", "already_linked", "game", "duel"])
+def test_link_code_rejects_invalid_claims_without_changing_accounts(store, case):
+    engine = Engine(store, "999")
+    code = store.create_link_code(123, "Luna", "luna", 1000)
+    with store.conn:
+        if case == "already_linked":
+            store.conn.execute("INSERT INTO twitch_chat_links VALUES('20',123,'Luna')")
+        if case == "game":
+            store.conn.execute("INSERT INTO twitch_chat_games VALUES('200','10','{}',2000)")
+        if case == "duel":
+            store.conn.execute("INSERT INTO twitch_chat_duels VALUES('200','20','10',50,2000,NULL)")
+    if case == "replaced":
+        store.create_link_code(123, "Luna", "luna", 1001)
+    result = run(engine, f"!link {code}", name="other" if case == "wrong_user" else "luna",
+                 now=1600 if case == "expired" else 1002)
+    assert "reply" in result
+    assert not engine.linked("10")
+    assert engine.balance("100", "10") == 500
+
+
+def test_link_instructions_and_prefix_work_without_website_account(store):
+    engine = Engine(store, "999")
+    store.configure("100", True, {**DEFAULTS, "prefix": "?"})
+    assert "?link CODE" in run(engine, "?link")["reply"]
+    code = store.create_link_code(123, "Luna", "LUNA", 1000)
+    assert "Discord verbunden!" in run(engine, f"?link {code.lower()}", now=1010, message_id="link")["reply"]
+    assert store.account("10") is None
+
+
+@pytest.mark.asyncio
+async def test_discord_link_command_returns_private_name_bound_code(store):
+    from cogs.twitch_link import TwitchLinkCog
+    cog = TwitchLinkCog(SimpleNamespace(db=SimpleNamespace(conn=store.conn)))
+    interaction = SimpleNamespace(user=SimpleNamespace(id=123), response=SimpleNamespace(send_message=AsyncMock()))
+    await cog.twitch_link.callback(cog, interaction, "xJessyX10")
+    sent = interaction.response.send_message.call_args
+    assert sent.kwargs["ephemeral"] is True
+    assert "!link " in sent.args[0]
+    row = store.conn.execute("SELECT * FROM twitch_chat_link_codes").fetchone()
+    assert row["twitch_login"] == "xjessyx10"
+    assert row["code_hash"] not in sent.args[0]
 
 
 def test_pay_cannot_convert_channel_coins_to_discord(store):
@@ -545,6 +659,12 @@ async def test_optional_link_requires_both_sessions_is_unique_and_blocks_open_ga
     assert (await client.post("/api/twitch/discord-link", json={"linked": True}, headers=headers)).status == 401
     panel.panel._session = lambda r: {"user_id": 123, "username": "Discord Luna"}
     assert (await client.post("/api/twitch/discord-link", json={"linked": True}, headers=headers)).status == 200
+    assert (await client.post("/api/twitch/discord-link", json={"linked": True}, headers=headers)).status == 200
+    with panel.store.conn:
+        panel.store.conn.execute("INSERT INTO levels(guild_id,user_id,coins) VALUES(0,123,4321)")
+    me = await (await client.get("/api/twitch/me")).json()
+    assert me["discord_link"]["coins"] == 4321
+    panel.panel._session = lambda r: {"user_id": 456, "username": "Other"}
     assert (await client.post("/api/twitch/discord-link", json={"linked": True}, headers=headers)).status == 409
     with panel.store.conn:
         panel.service.engine.touch("100", "10", "luna")
@@ -955,7 +1075,7 @@ def test_fair_queue_prioritizes_commands_and_keeps_channel_order_after_restart(s
     assert restarted.next_delivery(False, 1024)["id"] == "100:a1"
 
 
-def test_overload_does_not_charge_coins_or_consume_daily(store):
+def test_overload_skips_games_but_still_grants_automatic_daily(store):
     engine = Engine(store, "999")
     run(engine, "!daily", now=1000)
     for i in range(9):
@@ -964,8 +1084,8 @@ def test_overload_does_not_charge_coins_or_consume_daily(store):
     assert run(engine, "!slots 50", now=1010, message_id="overload") == {}
     assert engine.balance("100", "10") == 500
     assert run(engine, "!daily", uid="40", now=1010, message_id="daily-overload") == {}
-    assert engine.balance("100", "40") == 0
-    assert store.conn.execute("SELECT daily_at FROM twitch_chat_wallets WHERE user_id='40'").fetchone()[0] == 0
+    assert engine.balance("100", "40") == 500
+    assert store.conn.execute("SELECT daily_at FROM twitch_chat_wallets WHERE user_id='40'").fetchone()[0] == 1010
     assert store.conn.execute("SELECT outcome FROM twitch_chat_events WHERE id='100:overload'").fetchone()[0] == "overloaded"
     assert "reply" in run(engine, "!daily", cid="200", now=1010, message_id="room-in-other")
     store.finish("100:msg-1", "sent")
@@ -1046,7 +1166,7 @@ def test_global_reply_capacity_and_moderation_rate_limit_are_separate(store):
             run(engine, "!coins", cid=uid, uid=str(message), message_id=str(message), now=1000)
     assert not store.reply_capacity("100", 1000)
     assert run(engine, "!daily", now=1001) == {}
-    assert engine.balance("100", "10") == 0
+    assert engine.balance("100", "10") == 500
     for uid in ("100", "200"):
         store.configure(uid, True, {**DEFAULTS, "automod_enabled": True, "block_links": True})
         assert "moderate" in run(engine, "https://example.com", cid=uid, now=1002, message_id="mod")

@@ -5,6 +5,7 @@ import json
 import math
 import random
 import re
+import sqlite3
 import time
 import unicodedata
 from collections import OrderedDict, deque
@@ -24,8 +25,9 @@ LINK_RE = re.compile(r"(?:https?://|www\.|\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:
 LOGIN_RE = re.compile(r"[a-zA-Z0-9_]{1,25}\Z")
 
 COMMANDS = [
+    ("link [code]", "Discord verbinden oder Verknüpfung prüfen"),
     ("help", "Alle verfügbaren Befehle"), ("coins", "Dein Guthaben"),
-    ("daily", "Tägliche Coins abholen"), ("pay @name 50", "Coins überweisen"),
+    ("daily", "Daily-Status prüfen (Coins automatisch beim Schreiben)"), ("pay @name 50", "Coins überweisen"),
     ("leaderboard", "Die fünf reichsten Zuschauer"),
     ("hug / pat / kiss / slap / highfive @name", "Social-Aktionen"),
     ("friend add / accept / remove / level @name", "Freundschaften mit Zustimmung"),
@@ -79,7 +81,7 @@ class Engine:
         else:
             cur = self.db.execute("UPDATE twitch_chat_wallets SET coins=coins+? WHERE channel_id=? AND user_id=? AND coins+?>=0", (delta, cid, uid, delta))
         if not cur.rowcount:
-            raise CommandError("Dafür reichen deine Coins nicht. Mit !daily bekommst du neue Coins.")
+            raise CommandError("Dafür reichen deine Coins nicht. Deine Daily-Coins erhältst du automatisch beim Schreiben, sobald sie wieder verfügbar sind.")
 
     def target(self, cid: str, uid: str, value: str) -> tuple[str, str]:
         login = value.lstrip("@").lower()
@@ -142,13 +144,14 @@ class Engine:
                                           (cid, event["chatter_user_login"], reason, action, now))
                     result = {"moderate": {"reason": reason, "duration": cfg["timeout_seconds"], "log_id": log.lastrowid}}
                 else:
+                    daily_reward = self.claim_daily(cid, uid, cfg, now, silent=True)
                     self.store.timer_activity(cid)
                     message = event["message"]["text"].strip()
                     if message.startswith(cfg["prefix"]):
                         parts = message[len(cfg["prefix"]):].split()
                         if parts:
                             command = ALIASES.get(parts[0].lower(), parts[0].lower())
-                            custom = next((c for c in cfg["custom_commands"] if c["enabled"]
+                            custom = next((c for c in cfg["custom_commands"] if c["enabled"] and command != "link"
                                            and parts[0].lower() in [c["name"], *c["aliases"]]
                                            and permitted(c, event)), None)
                             # Resolve open hands even if the channel disabled the gambling module.
@@ -167,7 +170,8 @@ class Engine:
                                             self.db.execute("INSERT OR REPLACE INTO twitch_chat_command_cooldowns VALUES(?,?,?,?)",
                                                             (cid, custom["id"], who, now + duration))
                                     else:
-                                        reply = self.command(cid, uid, command, parts[1:], cfg, now)
+                                        reply = (daily_reward if command == "daily" and daily_reward else
+                                                 self.command(cid, uid, command, parts[1:], cfg, now))
                                         if command == "help":
                                             names = [cfg["prefix"] + c["name"] for c in cfg["custom_commands"] if c["enabled"] and permitted(c, event)]
                                             if names:
@@ -187,6 +191,28 @@ class Engine:
                             (json.dumps(result), json.dumps(event) if result else "{}", int(not result), "" if result else outcome, row["id"]))
             return result
 
+    def claim_daily(self, cid, uid, cfg, now, *, silent=False):
+        link = self.linked(uid)
+        if link:
+            row = self.db.execute("SELECT last_claim,streak FROM daily WHERE guild_id=0 AND user_id=?", (link[0],)).fetchone()
+            last, streak = row if row else (0, 0)
+        else:
+            last = self.db.execute("SELECT daily_at FROM twitch_chat_wallets WHERE channel_id=? AND user_id=?", (cid, uid)).fetchone()[0]
+            streak = 0
+        if last and now - last < DAILY_COOLDOWN:
+            if silent:
+                return None
+            return f"Daily wieder in {math.ceil((DAILY_COOLDOWN - now + last) / 60)} Minuten."
+        if link:
+            streak = streak + 1 if last and now - last <= DAILY_RESET else 1
+            reward = min(DAILY_PER_STREAK * streak, DAILY_CAP) + (WEEK_BONUS if streak % 7 == 0 else 0)
+            self.db.execute("INSERT OR REPLACE INTO daily VALUES(0,?,?,?)", (link[0], now, streak))
+        else:
+            reward = cfg["daily_coins"]
+            self.db.execute("UPDATE twitch_chat_wallets SET daily_at=? WHERE channel_id=? AND user_id=?", (now, cid, uid))
+        self.money(cid, uid, reward)
+        return f"+{reward} Coins! Guthaben: {self.balance(cid, uid)}."
+
     def custom_ready(self, cid, uid, command, now):
         return not self.db.execute("""SELECT 1 FROM twitch_chat_command_cooldowns
             WHERE channel_id=? AND command_id=? AND user_id IN ('*',?) AND until>?""",
@@ -199,8 +225,29 @@ class Engine:
 
     def command(self, cid: str, uid: str, cmd: str, args: list[str], cfg: dict, now: float) -> str | None:
         p = cfg["prefix"]
+        if cmd == "link":
+            linked = self.linked(uid)
+            if linked:
+                return f"Mit Discord verbunden · {self.balance(cid, uid)} Coins (Discord & Twitch). Konto prüfen oder trennen: yamikun.eu/twitch"
+            if not args:
+                return f"Noch nicht mit Discord verbunden. Nutze in Discord /twitch-link mit deinem Twitch-Namen, dann hier {p}link CODE."
+            if len(args) != 1 or not re.fullmatch(r"[0-9a-fA-F]{16}", args[0]):
+                raise CommandError(f"Ungültiger Code. Hole in Discord mit /twitch-link einen neuen Code und nutze {p}link CODE.")
+            code = self.db.execute("SELECT * FROM twitch_chat_link_codes WHERE code_hash=? AND expires>?",
+                                   (self.store.digest(args[0].upper()), now)).fetchone()
+            login = self.db.execute("SELECT login FROM twitch_chat_wallets WHERE channel_id=? AND user_id=?", (cid, uid)).fetchone()[0]
+            if not code or code["twitch_login"] != login.lower():
+                raise CommandError("Code ungültig, abgelaufen oder für einen anderen Twitch-Login. Starte /twitch-link in Discord erneut.")
+            if self.db.execute("SELECT 1 FROM twitch_chat_games WHERE user_id=?", (uid,)).fetchone() or self.db.execute("SELECT 1 FROM twitch_chat_duels WHERE challenger=? OR target=?", (uid, uid)).fetchone():
+                raise CommandError("Beende zuerst deine offenen Blackjack-Runden und Duellanfragen, bevor du Konten verbindest.")
+            try:
+                self.db.execute("INSERT INTO twitch_chat_links VALUES(?,?,?)", (uid, code["discord_id"], code["discord_name"]))
+            except sqlite3.IntegrityError:
+                raise CommandError("Dieses Discord-Konto ist bereits verbunden. Trenne zuerst die bestehende Verknüpfung auf yamikun.eu/twitch.")
+            self.db.execute("DELETE FROM twitch_chat_link_codes WHERE discord_id=?", (code["discord_id"],))
+            return f"Discord verbunden! {self.balance(cid, uid)} Coins (Discord & Twitch). Daily und Guthaben sind jetzt gemeinsam; bisherige Channel-Coins bleiben separat gespeichert."
         if cmd == "help":
-            groups = [f"{p}coins, {p}daily, {p}pay, {p}leaderboard"]
+            groups = [f"{p}coins, {p}daily, {p}pay, {p}leaderboard, {p}link"]
             if cfg["social_enabled"]:
                 groups.append(f"{p}hug/pat/kiss/slap/highfive @name, {p}friend, {p}marry")
             if cfg["gambling_enabled"]:
@@ -208,26 +255,10 @@ class Engine:
             return " | ".join(groups) + " · Anleitung: yamikun.eu/twitch"
         if cmd == "coins":
             scope = "Discord & Twitch" if self.linked(uid) else "dieser Twitch-Channel"
-            return f"{self.balance(cid, uid)} Coins ({scope})."
+            hint = "" if self.linked(uid) else f" Noch nicht mit Discord verbunden: {p}link."
+            return f"{self.balance(cid, uid)} Coins ({scope}).{hint}"
         if cmd == "daily":
-            link = self.linked(uid)
-            if link:
-                row = self.db.execute("SELECT last_claim,streak FROM daily WHERE guild_id=0 AND user_id=?", (link[0],)).fetchone()
-                last, streak = row if row else (0, 0)
-            else:
-                last = self.db.execute("SELECT daily_at FROM twitch_chat_wallets WHERE channel_id=? AND user_id=?", (cid, uid)).fetchone()[0]
-                streak = 0
-            if last and now - last < DAILY_COOLDOWN:
-                return f"Daily wieder in {math.ceil((DAILY_COOLDOWN - now + last) / 60)} Minuten."
-            if link:
-                streak = streak + 1 if last and now - last <= DAILY_RESET else 1
-                reward = min(DAILY_PER_STREAK * streak, DAILY_CAP) + (WEEK_BONUS if streak % 7 == 0 else 0)
-                self.db.execute("INSERT OR REPLACE INTO daily VALUES(0,?,?,?)", (link[0], now, streak))
-            else:
-                reward = cfg["daily_coins"]
-                self.db.execute("UPDATE twitch_chat_wallets SET daily_at=? WHERE channel_id=? AND user_id=?", (now, cid, uid))
-            self.money(cid, uid, reward)
-            return f"+{reward} Coins! Guthaben: {self.balance(cid, uid)}."
+            return self.claim_daily(cid, uid, cfg, now)
         if cmd == "leaderboard":
             rows = self.store.dashboard(cid)["leaderboard"][:5]
             return " | ".join(f"{i+1}. {r['login']}: {r['coins']}" for i, r in enumerate(rows)) or "Noch keine Coins."

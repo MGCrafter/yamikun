@@ -101,6 +101,11 @@ Referenz: [Twitch Send Chat Message](https://dev.twitch.tv/docs/api/reference/#s
   Offene Blackjack-Hände werden abgerechnet und unbeantwortete Duelle erstattet.
 - **Abmelden** beendet nur die Browser-Sitzung; der Bot bleibt im Channel aktiv.
 - Zuschauer brauchen keine Website-Anmeldung für normale Chat-Commands.
+- Ohne Website verbinden: In Discord `/twitch-link twitch_name:DEIN_LOGIN`
+  ausführen. Den nur dir angezeigten Code innerhalb von zehn Minuten als
+  `!link CODE` im Twitch-Chat mit Yami senden. Der Code ist einmalig und an
+  deinen angegebenen Twitch-Login gebunden. Neue Codes ersetzen alte Codes.
+  `!link` zeigt den Verknüpfungsstatus; `!coins` kennzeichnet das verwendete Guthaben.
 - Für eine optionale Discord-Verknüpfung auf `/twitch` zuerst mit Twitch, dann
   zusätzlich mit Discord anmelden. Vor dem Verbinden wird das Discord-Konto
   angezeigt. Dafür muss der Zuschauer den Bot nicht im eigenen Channel aktivieren.
@@ -108,6 +113,8 @@ Referenz: [Twitch Send Chat Message](https://dev.twitch.tv/docs/api/reference/#s
   Discord-Guthaben. Lokale Twitch-Coins werden weder übertragen noch addiert;
   nach dem Trennen stehen sie wieder zur Verfügung. Ein Discord-Konto kann nur
   mit einem Twitch-Konto verbunden sein.
+- Jede zugelassene Chatnachricht schreibt ein verfügbares Daily automatisch und ohne
+  zusätzliche Chatmeldung gut. `!daily` bleibt zur manuellen Abfrage verfügbar.
 - Das Daily teilt bei verknüpften Konten den Discord-Cooldown und die
   Streak-Belohnung. Einstellbare Channel-Dailys gelten ausschließlich für lokale
   Twitch-Coins. Überweisungen und Duelle sind nur zwischen demselben Coin-Typ
@@ -123,7 +130,8 @@ Standard-Präfix ist `!`; erlaubt sind 1–3 Zeichen aus `! ? . $`.
 | --- | --- |
 | `!help`, `!commands` | Übersicht aktivierter Module |
 | `!coins`, `!balance` | Aktuelles Guthaben und Coin-Typ |
-| `!daily` | Daily alle 24 Stunden |
+| `!link [CODE]` | Discord per privatem Einmalcode verbinden oder Status prüfen |
+| `!daily` | Daily-Status prüfen; Coins automatisch bei der ersten Chatnachricht nach Ablauf von 24 Stunden |
 | `!pay @name 50` | Überweisung |
 | `!leaderboard`, `!top` | Top 5 im Channel |
 | `!hug`, `!pat`, `!kiss`, `!slap`, `!highfive @name` | Social-Aktionen |
@@ -279,7 +287,8 @@ deshalb ein höherer Command-Cooldown sinnvoll sein.
 
 Bei zehn ausstehenden Antworten in einem Channel oder 50 insgesamt werden neue
 Commands vor ihrer Ausführung übersprungen und Timer vorerst nicht eingeplant.
-Solche übersprungenen Commands buchen keine Coins und verbrauchen kein Daily.
+Solche übersprungenen Commands führen keine Spiel- oder Überweisungsbuchungen aus.
+Das automatische Daily wird unabhängig von der Antwort-Warteschlange gutgeschrieben.
 Im Chat wird dafür keine weitere Meldung erzeugt, die die Warteschlange zusätzlich
 füllen würde. Bereits angenommene Commands können bei einem späteren Ausfall
 trotzdem ohne zugestellte Antwort bleiben; ihre gespeicherten Ergebnisse werden

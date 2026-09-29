@@ -168,7 +168,8 @@ class TwitchChatPanel:
         result.update({"authenticated": True, "csrf": sess["csrf"],
                        "can_setup_bot": uid == self.service.bot_id,
                        "user": {"id": uid, "login": account["login"], "display_name": account["display_name"]},
-                       "discord_link": {"id": str(link[0]), "name": link[1]} if link else None,
+                       "discord_link": {"id": str(link[0]), "name": link[1],
+                                        "coins": self.service.engine.balance(uid, uid)} if link else None,
                        "discord_session": {"id": str(discord["user_id"]), "name": discord["username"]} if discord else None,
                        **self.store.dashboard(uid)})
         return web.json_response(result)
@@ -220,6 +221,9 @@ class TwitchChatPanel:
             discord = self.panel._session(request)
             if not discord:
                 return error(401, "discord_login_required")
+            existing = self.store.conn.execute("SELECT discord_id FROM twitch_chat_links WHERE twitch_id=?", (uid,)).fetchone()
+            if existing and existing[0] == discord["user_id"]:
+                return await self.me(request)
             try:
                 with self.store.conn:
                     self.store.conn.execute("INSERT INTO twitch_chat_links VALUES(?,?,?)", (uid, discord["user_id"], discord["username"]))

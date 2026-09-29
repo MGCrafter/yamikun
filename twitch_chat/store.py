@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import time
 import uuid
@@ -79,6 +80,10 @@ class Store:
                 twitch_id TEXT PRIMARY KEY, discord_id INTEGER NOT NULL UNIQUE,
                 discord_name TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS twitch_chat_link_codes (
+                code_hash TEXT PRIMARY KEY, discord_id INTEGER NOT NULL UNIQUE,
+                discord_name TEXT NOT NULL, twitch_login TEXT NOT NULL, expires REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS twitch_chat_modlog (
                 id INTEGER PRIMARY KEY, channel_id TEXT NOT NULL, login TEXT NOT NULL,
                 reason TEXT NOT NULL, action TEXT NOT NULL, created REAL NOT NULL,
@@ -121,6 +126,14 @@ class Store:
     @staticmethod
     def digest(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
+
+    def create_link_code(self, discord_id: int, name: str, login: str, now: float) -> str:
+        code = secrets.token_hex(8).upper()
+        with self.conn:
+            self.conn.execute("DELETE FROM twitch_chat_link_codes WHERE discord_id=? OR expires<=?", (discord_id, now))
+            self.conn.execute("INSERT INTO twitch_chat_link_codes VALUES(?,?,?,?,?)",
+                              (self.digest(code), discord_id, name, login.lower(), now + 600))
+        return code
 
     def account(self, uid: str, role: str = "channel") -> dict | None:
         row = self.conn.execute("SELECT * FROM twitch_chat_accounts WHERE user_id=? AND role=?", (uid, role)).fetchone()
@@ -303,6 +316,7 @@ class Store:
         with self.conn:
             self.conn.execute("DELETE FROM twitch_chat_sessions WHERE expires<?", (now,))
             self.conn.execute("DELETE FROM twitch_chat_oauth WHERE expires<?", (now,))
+            self.conn.execute("DELETE FROM twitch_chat_link_codes WHERE expires<=?", (now,))
             self.conn.execute("DELETE FROM twitch_chat_command_cooldowns WHERE until<?", (now,))
             self.conn.execute("DELETE FROM twitch_chat_events WHERE created<? AND delivered=1", (now - 86400,))
             self.conn.execute("DELETE FROM twitch_chat_modlog WHERE created<?", (now - 30 * 86400,))

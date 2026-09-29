@@ -59,6 +59,7 @@ COGS: tuple[str, ...] = (
     "cogs.welcome",
     "cogs.boostnotify",
     "cogs.twitch",
+    "cogs.twitch_link",
     "cogs.autoroles",
     "cogs.audit",
     "cogs.fun",
