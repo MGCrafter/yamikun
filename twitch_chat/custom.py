@@ -9,6 +9,7 @@ BUILTIN_NAMES = frozenset({
     "hug", "pat", "kiss", "slap", "highfive", "friend", "marry", "marriages", "divorce",
     "coinflip", "cf", "slots", "roulette", "blackjack", "bj", "blackjackduel",
     "hit", "stand", "double", "split", "link",
+    "title", "titel", "game", "spiel", "category", "kategorie",
 })
 LEVELS = ("everyone", "subscriber", "vip", "moderator", "broadcaster")
 NAME = re.compile(r"[a-z0-9][a-z0-9_]{0,24}\Z")

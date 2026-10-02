@@ -19,7 +19,9 @@ from twitch_chat.store import Store
 from twitch_chat.custom import BUILTIN_NAMES, permitted, render_response
 
 SOCIAL = {"hug": "umarmt", "pat": "tätschelt", "kiss": "küsst", "slap": "gibt eine spielerische Ohrfeige an", "highfive": "gibt ein High-Five an"}
-ALIASES = {"balance": "coins", "cf": "coinflip", "bj": "blackjack", "top": "leaderboard", "commands": "help"}
+ALIASES = {"balance": "coins", "cf": "coinflip", "bj": "blackjack", "top": "leaderboard", "commands": "help",
+           "titel": "title", "spiel": "game", "category": "game", "kategorie": "game"}
+STREAM_COMMANDS = {"title", "game"}
 GAMES = {"coinflip", "slots", "roulette", "blackjack", "blackjackduel"}
 LINK_RE = re.compile(r"(?:https?://|www\.|\b[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:[a-z]{2,24})(?:[/\s:]|$))", re.I)
 LOGIN_RE = re.compile(r"[a-zA-Z0-9_]{1,25}\Z")
@@ -27,6 +29,8 @@ LOGIN_RE = re.compile(r"[a-zA-Z0-9_]{1,25}\Z")
 COMMANDS = [
     ("link [code]", "Discord verbinden oder Verknüpfung prüfen"),
     ("help", "Alle verfügbaren Befehle"), ("coins", "Dein Guthaben"),
+    ("title / titel [neuer Titel]", "Streamtitel anzeigen; ändern: Mods & Streamer"),
+    ("game / spiel / category / kategorie [Kategorie]", "Kategorie anzeigen; ändern: Mods & Streamer"),
     ("daily", "Daily-Status prüfen (Coins automatisch beim Schreiben)"), ("pay @name 50", "Coins überweisen"),
     ("leaderboard", "Die fünf reichsten Zuschauer"),
     ("hug / pat / kiss / slap / highfive @name", "Social-Aktionen"),
@@ -151,7 +155,7 @@ class Engine:
                         parts = message[len(cfg["prefix"]):].split()
                         if parts:
                             command = ALIASES.get(parts[0].lower(), parts[0].lower())
-                            custom = next((c for c in cfg["custom_commands"] if c["enabled"] and command != "link"
+                            custom = next((c for c in cfg["custom_commands"] if c["enabled"] and command not in {"link", *STREAM_COMMANDS}
                                            and parts[0].lower() in [c["name"], *c["aliases"]]
                                            and permitted(c, event)), None)
                             # Resolve open hands even if the channel disabled the gambling module.
@@ -162,6 +166,7 @@ class Engine:
                             if ready and not self.store.reply_capacity(cid, now):
                                 outcome = "overloaded"
                             elif ready:
+                                stream_update = None
                                 self.db.execute("SAVEPOINT command")
                                 try:
                                     if custom:
@@ -169,10 +174,16 @@ class Engine:
                                         for who, duration in (("*", custom["cooldown"]), (uid, custom["user_cooldown"])):
                                             self.db.execute("INSERT OR REPLACE INTO twitch_chat_command_cooldowns VALUES(?,?,?,?)",
                                                             (cid, custom["id"], who, now + duration))
+                                    elif command in STREAM_COMMANDS:
+                                        value = message[len(cfg["prefix"]):].split(maxsplit=1)
+                                        stream_update = self.stream_command(command, value[1] if len(value) > 1 else "", event)
+                                        reply = ""
                                     else:
                                         reply = (daily_reward if command == "daily" and daily_reward else
                                                  self.command(cid, uid, command, parts[1:], cfg, now))
                                         if command == "help":
+                                            if permitted({"user_level": "moderator"}, event):
+                                                reply += f" | Mods: {cfg['prefix']}title, {cfg['prefix']}game"
                                             names = [cfg["prefix"] + c["name"] for c in cfg["custom_commands"] if c["enabled"] and permitted(c, event)]
                                             if names:
                                                 reply += " | Eigene: " + ", ".join(names)
@@ -181,15 +192,29 @@ class Engine:
                                     reply = str(exc).replace("!", cfg["prefix"])
                                 finally:
                                     self.db.execute("RELEASE command")
-                                if reply:
+                                if reply or stream_update:
                                     if custom:
                                         result = {"reply": reply, "custom_command_id": custom["id"]}
                                     else:
                                         self.db.execute("UPDATE twitch_chat_wallets SET command_at=? WHERE channel_id=? AND user_id=?", (now, cid, uid))
                                         result = {"reply": f"@{event['chatter_user_login']} {reply}"[:500]}
+                                        if stream_update:
+                                            result["stream_update"] = stream_update
             self.db.execute("UPDATE twitch_chat_events SET processed=1,result=?,payload=?,delivered=?,outcome=? WHERE id=?",
                             (json.dumps(result), json.dumps(event) if result else "{}", int(not result), "" if result else outcome, row["id"]))
             return result
+
+    def stream_command(self, command: str, value: str, event: dict) -> dict:
+        if value:
+            if not permitted({"user_level": "moderator"}, event):
+                raise CommandError("Nur Mods und der Streamer können Titel und Kategorie ändern.")
+            if any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise CommandError("Bitte Titel oder Kategorie in einer Zeile angeben.")
+            if command == "title" and len(value) > 140:
+                raise CommandError("Der Streamtitel darf höchstens 140 Zeichen haben.")
+            if not "".join(c for c in value if unicodedata.category(c) != "Cf").strip():
+                raise CommandError("Bitte einen sichtbaren Titel oder Kategorienamen angeben.")
+        return {"command": command, "value": value}
 
     def claim_daily(self, cid, uid, cfg, now, *, silent=False):
         link = self.linked(uid)

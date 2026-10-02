@@ -48,6 +48,220 @@ def run(engine, text="!daily", *, now=1000, **kwargs):
     return engine.process(dict(row), now)
 
 
+@pytest.mark.parametrize("command", ["title", "game"])
+@pytest.mark.parametrize("uid,badges,allowed", [
+    ("10", [], False), ("10", ["vip"], False), ("10", ["subscriber"], False),
+    ("10", ["broadcaster"], False), ("10", ["moderator"], True), ("100", [], True),
+])
+def test_stream_changes_require_channel_mod_or_broadcaster(store, command, uid, badges, allowed):
+    result = run(Engine(store, "999"), f"!{command} Neuer Wert", uid=uid,
+                 badges=[{"set_id": badge} for badge in badges])
+    assert bool(result.get("stream_update")) is allowed
+    if not allowed:
+        assert "Nur Mods" in result["reply"]
+
+
+@pytest.mark.parametrize("alias,command", [
+    ("title", "title"), ("titel", "title"), ("game", "game"),
+    ("spiel", "game"), ("category", "game"), ("kategorie", "game"),
+])
+def test_stream_aliases_prefix_queries_and_reserved_names(store, alias, command):
+    store.configure("100", True, {**DEFAULTS, "prefix": "?", "social_enabled": False, "gambling_enabled": False})
+    result = run(Engine(store, "999"), f"?{alias}")
+    assert result["stream_update"] == {"command": command, "value": ""}
+    with pytest.raises(ValueError):
+        settings({**DEFAULTS, "custom_commands": [custom_command(name=alias, aliases=[])]})
+
+
+def test_stream_title_preserves_text_and_deduplicates_with_cooldown(store):
+    engine = Engine(store, "999")
+    value = "Heute  spielen wir: ÄÖÜ 😺!"
+    first = run(engine, "!titel " + value, uid="100")
+    assert first["stream_update"] == {"command": "title", "value": value}
+    assert run(Engine(Store(store.conn), "999"), "!titel " + value, uid="100") == first
+    assert run(engine, "!title Neuer Titel", uid="100", now=1001, message_id="cooldown") == {}
+    assert run(engine, "!title " + "x" * 140, uid="100", now=1005, message_id="boundary")["stream_update"]["value"] == "x" * 140
+    assert run(engine, "!title Neuer Titel", cid="200", uid="100", message_id="other").get("stream_update") is None
+
+
+@pytest.mark.parametrize("value,hint", [("x" * 141, "140"), ("Titel\nzweite Zeile", "einer Zeile"), ("\u200b", "sichtbaren")])
+def test_invalid_stream_titles_do_not_queue_changes(store, value, hint):
+    result = run(Engine(store, "999"), "!title " + value, uid="100")
+    assert "stream_update" not in result and hint in result["reply"]
+
+
+def test_legacy_custom_stream_name_cannot_bypass_edit_permissions(store):
+    store.configure("100", True, {**DEFAULTS, "custom_commands": [custom_command(name="title", aliases=[])]})
+    result = run(Engine(store, "999"), "!title New title")
+    assert "Nur Mods" in result["reply"] and "custom_command_id" not in result
+
+
+async def deliver_stream_event(service):
+    task = asyncio.create_task(service.deliver(False))
+    async def completed():
+        while service.store.conn.execute("SELECT COUNT(*) FROM twitch_chat_events WHERE delivered=0").fetchone()[0]:
+            await asyncio.sleep(.01)
+    try:
+        await asyncio.wait_for(completed(), 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cid", ["100", "200"])
+async def test_stream_title_delivery_uses_own_broadcaster_and_confirms_after_patch(store, configured, cid):
+    service = Service(store.conn, "https://yamikun.eu")
+    run(service.engine, "!title Heute  Minecraft! 😺", uid=cid, cid=cid, now=time.time())
+    async def api(method, path, **kwargs):
+        assert not store.conn.in_transaction
+        if method == "PATCH":
+            assert path == "channels" and kwargs["account"] == (cid, "channel")
+            assert kwargs["params"] == {"broadcaster_id": cid}
+            assert kwargs["json"] == {"title": "Heute  Minecraft! 😺"}
+            saved = json.loads(store.conn.execute("SELECT result FROM twitch_chat_events").fetchone()[0])
+            assert "stream_update" not in saved and "nicht bestätigt" in saved["reply"]
+            return {}
+        assert (method, path) == ("POST", "chat/messages")
+        assert kwargs["json"]["broadcaster_id"] == cid
+        assert kwargs["json"]["sender_id"] == "999" and kwargs["json"]["for_source_only"]
+        assert "Streamtitel geändert: Heute  Minecraft! 😺" in kwargs["json"]["message"]
+        return {"data": [{"is_sent": True}]}
+    service.api = AsyncMock(side_effect=api)
+    await deliver_stream_event(service)
+    assert service.api.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command,key,hint", [("title", "title", "Aktueller Titel"), ("game", "game_name", "Aktuelle Kategorie")])
+async def test_viewers_can_read_stream_information_without_broadcaster_token(store, configured, command, key, hint):
+    service = Service(store.conn, "https://yamikun.eu")
+    run(service.engine, "!" + command, now=time.time())
+    service.api = AsyncMock(side_effect=[{"data": [{key: "Aktueller Wert"}]}, {"data": [{"is_sent": True}]}])
+    await deliver_stream_event(service)
+    first = service.api.await_args_list[0]
+    assert first.args == ("GET", "channels") and first.kwargs == {"params": {"broadcaster_id": "100"}}
+    assert hint + ": Aktueller Wert" in service.api.await_args_list[1].kwargs["json"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("matches,cursor,changed,hint", [
+    ([{"id": "2", "name": "Minecraft Dungeons"}, {"id": "1", "name": "Minecraft"}], "more", True, "Kategorie geändert: Minecraft"),
+    ([{"id": "1", "name": "Minecraft"}], "", True, "Kategorie geändert: Minecraft"),
+    ([{"id": "2", "name": "Minecraft Dungeons"}], "", True, "Kategorie geändert: Minecraft Dungeons"),
+    ([{"id": "2", "name": "Minecraft Dungeons"}], "more", False, "nicht eindeutig"),
+    ([{"id": "2", "name": "Minecraft Dungeons"}, {"id": "3", "name": "Minecraft Legends"}], "", False, "nicht eindeutig"),
+    ([], "", False, "Keine passende"),
+])
+async def test_stream_category_resolution_never_guesses_ambiguous_matches(store, configured, matches, cursor, changed, hint):
+    service = Service(store.conn, "https://yamikun.eu")
+    run(service.engine, "!kategorie minecraft", badges=[{"set_id": "moderator"}], now=time.time())
+    async def api(method, path, **kwargs):
+        if path == "search/categories":
+            assert method == "GET" and kwargs["params"] == {"query": "minecraft", "first": "100"}
+            return {"data": matches, "pagination": {"cursor": cursor} if cursor else {}}
+        if method == "PATCH":
+            assert kwargs["account"] == ("100", "channel") and kwargs["params"]["broadcaster_id"] == "100"
+            expected = "1" if any(item["id"] == "1" for item in matches) else "2"
+            assert kwargs["json"] == {"game_id": expected}
+            return {}
+        assert hint in kwargs["json"]["message"]
+        return {"data": [{"is_sent": True}]}
+    service.api = AsyncMock(side_effect=api)
+    await deliver_stream_event(service)
+    assert sum(call.args[0] == "PATCH" for call in service.api.await_args_list) == int(changed)
+
+
+@pytest.mark.asyncio
+async def test_pause_during_category_lookup_cancels_stream_change(store, configured):
+    service = Service(store.conn, "https://yamikun.eu")
+    run(service.engine, "!game Minecraft", uid="100", now=time.time())
+    async def api(*args, **kwargs):
+        store.configure("100", False, dict(DEFAULTS))
+        return {"data": [{"id": "1", "name": "Minecraft"}]}
+    service.api = AsyncMock(side_effect=api)
+    await deliver_stream_event(service)
+    assert service.api.await_count == 1
+    assert store.conn.execute("SELECT outcome FROM twitch_chat_events").fetchone()[0] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,hint", [
+    (TwitchError("twitch_401", 401), "Freigabe"), (TwitchError("twitch_403", 403), "Freigabe"),
+    (TwitchError("twitch_400", 400), "abgelehnt"), (TwitchError("twitch_429", 429), "begrenzt"),
+    (TwitchError("twitch_500", 500), "nicht bestätigt"), (asyncio.TimeoutError("secret upstream body"), "nicht bestätigt"),
+])
+async def test_stream_failures_send_actionable_reply_without_false_success(store, configured, failure, hint, caplog):
+    service = Service(store.conn, "https://yamikun.eu")
+    run(service.engine, "!title Neuer Titel", uid="100", now=time.time())
+    service.api = AsyncMock(side_effect=[failure, {"data": [{"is_sent": True}]}])
+    await deliver_stream_event(service)
+    reply = service.api.await_args_list[1].kwargs["json"]["message"]
+    assert hint in reply and "geändert" not in reply
+    assert "secret upstream body" not in reply + caplog.text
+    assert service.api.await_count == 2 and store.channel("100")["enabled"]
+
+
+@pytest.mark.asyncio
+async def test_stream_update_is_not_replayed_when_chat_send_retries(store, configured, monkeypatch):
+    service = Service(store.conn, "https://yamikun.eu")
+    clock = [time.time()]
+    monkeypatch.setattr("twitch_chat.service.time.time", lambda: clock[0])
+    run(service.engine, "!title Neuer Titel", uid="100", now=clock[0])
+    real_sleep = asyncio.sleep
+    async def fast_sleep(delay):
+        clock[0] += delay
+        await real_sleep(0)
+    monkeypatch.setattr("twitch_chat.service.asyncio.sleep", fast_sleep)
+    service.api = AsyncMock(side_effect=[{}, TwitchError("twitch_500", 500), {"data": [{"is_sent": True}]}])
+    await deliver_stream_event(service)
+    assert [call.args[0] for call in service.api.await_args_list] == ["PATCH", "POST", "POST"]
+    assert service.api.await_args_list[1].kwargs == service.api.await_args_list[2].kwargs
+    assert store.conn.execute("SELECT delivered,attempts FROM twitch_chat_events").fetchone()[:] == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_restart_during_patch_sends_uncertainty_reply_without_replaying_change(store, configured):
+    service = Service(store.conn, "https://yamikun.eu")
+    run(service.engine, "!title Neuer Titel", uid="100", now=time.time())
+    started = asyncio.Event()
+    async def api(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+    service.api = AsyncMock(side_effect=api)
+    task = asyncio.create_task(service.deliver(False))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    restarted = Service(store.conn, "https://yamikun.eu")
+    restarted.api = AsyncMock(return_value={"data": [{"is_sent": True}]})
+    await deliver_stream_event(restarted)
+    assert restarted.api.await_count == 1 and restarted.api.await_args.args == ("POST", "chat/messages")
+    assert "nicht bestätigt" in restarted.api.await_args.kwargs["json"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_channel_grants_keep_working_without_stream_scope(store, configured):
+    service = Service(store.conn, "https://yamikun.eu")
+    credentials = {"access_token": "legacy-access", "refresh_token": "legacy-refresh", "expires_at": time.time() + 4000}
+    store.save_account("100", "channel", "channel100", "Channel", service.encrypt(credentials))
+    service.validate = AsyncMock(return_value={"client_id": "client", "user_id": "100", "scopes": list(SCOPES["channel"] - {"channel:manage:broadcast"})})
+    assert await service.user_token("100") == "legacy-access"
+    assert store.account("100") and store.channel("100")["enabled"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bot", [False, True])
+async def test_oauth_requests_stream_management_only_for_channel_grants(panel, bot):
+    panel, client = panel
+    panel.service.http = object()
+    res = await client.get("/twitch/login" + ("?bot=1" if bot else ""), allow_redirects=False)
+    scopes = parse_qs(urlsplit(res.headers["Location"]).query)["scope"][0].split()
+    assert ("channel:manage:broadcast" in scopes) is not bot
+
+
 def test_daily_deduplicates_across_restart_and_channels_are_isolated(store):
     engine = Engine(store, "999")
     first = run(engine)

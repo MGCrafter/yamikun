@@ -60,7 +60,8 @@ StreamElements und TwitchIO steht in [Twitch-Prüfung vom 28.09.2026](twitch-rev
 7. Mit dem eigenen Streamer-Konto `/twitch` öffnen, Twitch-Freigabe erteilen und
    **Bot zu meinem Channel hinzufügen** wählen. Die Verbindung wird normalerweise
    innerhalb einer Minute bestätigt. Twitch vergibt dafür `channel:bot` sowie
-   die Freigaben zum Löschen von Nachrichten und Vergeben von Timeouts.
+   die Freigaben zum Löschen von Nachrichten und Vergeben von Timeouts sowie
+   `channel:manage:broadcast` für Streamtitel und Kategorie.
 
 Yami liest Chat-Nachrichten über EventSub-Webhooks und antwortet über die Send
 Chat Message API unter dem Botkonto. AutoMod nutzt die Freigabe des Broadcasters
@@ -160,6 +161,38 @@ Split und Double erfordern zusätzliches Guthaben.
 Andere Personen müssen zuvor im Chat geschrieben haben, damit ihre stabile
 Twitch-ID bekannt ist. Namen allein werden nicht als dauerhafte Identität genutzt.
 Alle Beträge sind virtuelle Coins ohne Echtgeldkäufe oder Auszahlung.
+
+## Streamtitel und Kategorie per Chat
+
+| Command | Wirkung |
+| --- | --- |
+| `!title` / `!titel` | Aktuellen Streamtitel anzeigen |
+| `!title Neuer Streamtitel` / `!titel Neuer Streamtitel` | Streamtitel ändern (maximal 140 Zeichen) |
+| `!game` / `!kategorie` | Aktuelle Kategorie anzeigen |
+| `!game Just Chatting` / `!kategorie Minecraft` | Spiel bzw. Kategorie ändern |
+
+Änderungen dürfen ausschließlich Twitch-Moderatoren des jeweiligen Channels und
+der Streamer selbst ausführen. Zuschauer, VIPs und Abonnenten können den aktuellen
+Stand abfragen. `!spiel` und `!category` sind weitere Aliasse für `!game`.
+Es gilt das im Dashboard eingestellte Präfix und der normale Command-Cooldown.
+Die Commands funktionieren auch, wenn Social und Gambling ausgeschaltet sind,
+und können die Informationen für den nächsten Stream auch offline ändern.
+
+Bei bestehenden Verbindungen muss der Streamer im Twitch-Dashboard einmal
+**Twitch-Freigabe für Titel und Kategorie erneuern** wählen und mit seinem
+Streamer-Konto die zusätzliche Berechtigung bestätigen. Mods brauchen keine
+eigene Bot-Anmeldung. Bestehende Chat-Freigaben bleiben für die übrigen Funktionen
+gültig. Die Änderung nutzt den Token des Streamers für genau dessen Channel.
+
+Kategorien werden bei Twitch gesucht. Ein exakter Name oder ein einzelner
+eindeutiger Treffer wird übernommen; bei mehreren Treffern nennt Yami Vorschläge
+und ändert die Kategorie erst nach einem eindeutigen Command. Vor dem
+Änderungsaufruf wird der Versuch gespeichert, danach die bestätigte Antwort.
+Ein Neustart oder erneuter Chat-Versand wiederholt dadurch keine möglicherweise
+bereits abgeschlossene Änderung. Bei einem Verbindungsabbruch ohne Bestätigung
+sollte der aktuelle Stand auf Twitch geprüft werden.
+
+Referenz: [Twitch Modify Channel Information](https://dev.twitch.tv/docs/api/reference/#modify-channel-information).
 
 ## Eigene Commands
 

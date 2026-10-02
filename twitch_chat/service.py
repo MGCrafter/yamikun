@@ -20,9 +20,10 @@ from twitch_chat.store import Store
 logger = logging.getLogger("oaken-tower-bot")
 OAUTH = "https://id.twitch.tv/oauth2"
 HELIX = "https://api.twitch.tv/helix/"
+BROADCAST_SCOPE = "channel:manage:broadcast"
 SCOPES = {
     "bot": {"user:read:chat", "user:write:chat", "user:bot"},
-    "channel": {"channel:bot", "moderator:manage:chat_messages", "moderator:manage:banned_users"},
+    "channel": {"channel:bot", "moderator:manage:chat_messages", "moderator:manage:banned_users", BROADCAST_SCOPE},
 }
 
 
@@ -189,7 +190,9 @@ class Service:
         return await self.request("GET", OAUTH + "/validate", headers={"Authorization": "OAuth " + token})
 
     def check_identity(self, valid, uid, role):
-        if valid.get("client_id") != self.client_id or valid.get("user_id") != uid or not SCOPES[role].issubset(valid.get("scopes", [])):
+        # Existing chat grants remain valid until the streamer opts into stream editing.
+        required = SCOPES[role] - {BROADCAST_SCOPE} if role == "channel" else SCOPES[role]
+        if valid.get("client_id") != self.client_id or valid.get("user_id") != uid or not required.issubset(valid.get("scopes", [])):
             raise TwitchError("missing_scopes", 403)
 
     async def authorize(self, code: str, role: str):
@@ -381,6 +384,60 @@ class Service:
                 logger.exception("Twitch-Chat: Unerwarteter Fehler bei Autonachrichten.")
             await asyncio.sleep(15)
 
+    def stream_command_active(self, row) -> bool:
+        channel = self.store.channel(row["channel_id"])
+        current = self.store.conn.execute("SELECT delivered FROM twitch_chat_events WHERE id=?", (row["id"],)).fetchone()
+        return bool(channel and channel["enabled"] and current and not current[0] and time.time() - row["created"] < 120)
+
+    async def stream_reply(self, row, command: dict) -> str | None:
+        cid, name, value = row["channel_id"], command["command"], command["value"]
+        try:
+            if not value:
+                info = await self.api("GET", "channels", params={"broadcaster_id": cid})
+                data = info.get("data", [])
+                if not data:
+                    return "Die Streaminformationen sind gerade nicht verfügbar."
+                label, key = ("Aktueller Titel", "title") if name == "title" else ("Aktuelle Kategorie", "game_name")
+                return f"{label}: {data[0].get(key) or 'Noch nicht gesetzt'}."
+            if name == "title":
+                body, reply = {"title": value}, f"Streamtitel geändert: {value}"
+            else:
+                data = await self.api("GET", "search/categories", params={"query": value, "first": "100"})
+                matches = data.get("data", [])
+                exact = [item for item in matches if item["name"].casefold() == value.casefold()]
+                if len(exact) == 1:
+                    category = exact[0]
+                elif len(matches) == 1 and not data.get("pagination", {}).get("cursor"):
+                    category = matches[0]
+                elif not matches:
+                    return "Keine passende Twitch-Kategorie gefunden. Bitte den vollständigen Kategorienamen angeben."
+                else:
+                    suggestions = " | ".join(item["name"] for item in matches[:5])
+                    return f"Kategorie nicht eindeutig. Bitte genauer angeben: {suggestions}"
+                body, reply = {"game_id": category["id"]}, f"Kategorie geändert: {category['name']}"
+            # Category lookup may yield while the channel is paused or the event expires.
+            if not self.stream_command_active(row):
+                return None
+            # Mark the write before the network await. If the worker stops while
+            # Twitch applies it, a restart sends this hint instead of replaying it.
+            event = json.loads(row["payload"])
+            pending = {"reply": f"@{event['chatter_user_login']} Streamänderung konnte nicht bestätigt werden. Bitte den aktuellen Stand auf Twitch prüfen."}
+            with self.store.conn:
+                self.store.conn.execute("UPDATE twitch_chat_events SET result=? WHERE id=?", (json.dumps(pending), row["id"]))
+            await self.api("PATCH", "channels", account=(cid, "channel"), params={"broadcaster_id": cid}, json=body)
+            return reply
+        except (TwitchError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning("Twitch-Chat: Streaminformationen nicht bestätigt (channel=%s, %s).", cid,
+                           exc.diagnostic if isinstance(exc, TwitchError) else type(exc).__name__)
+            if isinstance(exc, TwitchError):
+                if value and exc.status in {401, 403}:
+                    return "Streamänderung nicht möglich. Der Streamer muss auf yamikun.eu/twitch die Twitch-Freigabe für Titel und Kategorie erneuern."
+                if exc.status == 400:
+                    return "Twitch hat die Streamänderung abgelehnt. Bitte Titel oder Kategorie prüfen."
+                if exc.status == 429:
+                    return "Twitch begrenzt gerade die Anfragen. Bitte später erneut versuchen."
+            return "Streaminformationen konnten nicht bestätigt werden. Bitte auf Twitch prüfen und später erneut versuchen."
+
     async def deliver(self, moderation: bool):
         action = "moderation" if moderation else "send"
         while True:
@@ -421,6 +478,16 @@ class Service:
                     self.store.finish(row["id"], "cancelled")
                     continue
                 event = json.loads(row["payload"])
+                if not moderation and result.get("stream_update"):
+                    reply = await self.stream_reply(row, result["stream_update"])
+                    if reply is None or not self.stream_command_active(row):
+                        self.store.finish(row["id"], "expired" if time.time() - row["created"] >= 120 else "cancelled")
+                        continue
+                    result = {"reply": f"@{event['chatter_user_login']} {reply}"[:500]}
+                    # Persist the resolved reply before sending. A chat retry must never
+                    # apply an older stream change again after a newer command.
+                    with self.store.conn:
+                        self.store.conn.execute("UPDATE twitch_chat_events SET result=? WHERE id=?", (json.dumps(result), row["id"]))
                 self.store.dispatch_attempt(cid, moderation, time.time())
                 attempted_delivery = True
                 if moderation:
