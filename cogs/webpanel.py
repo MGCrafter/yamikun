@@ -442,7 +442,7 @@ class WebPanelCog(commands.Cog):
         code = request.query.get("code")
         state = request.query.get("state")
         return_to_twitch = bool(state) and state == request.cookies.get("yami_discord_twitch_return")
-        if not code or state != request.cookies.get(STATE_COOKIE):
+        if not code or not state or state != request.cookies.get(STATE_COOKIE):
             raise web.HTTPFound("/?error=state")
         assert self._http is not None
         data = {
